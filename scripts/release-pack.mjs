@@ -4,7 +4,9 @@
 // The stage is the first of these that exists: a `test:pack`, `pack-smoke` or `check:pack` script in package.json, else
 // `node scripts/check.mjs pack` when scripts/check.mjs has a pack stage. A repository with none is refused, with the reason.
 // The stage gets the tarball as PACK_TARBALL (the file) and PACKED_DIR (its folder; utilities' pack test reads that). When
-// no file under scripts/, test/ or tests/ reads either, the stage may test its own tarball: that is printed as a warning.
+// no file under scripts/, test/ or tests/ names either as a whole word, the stage may test its own tarball: that is
+// printed as a warning. A longer name that contains one, such as SLACK_PACK_TARBALL, is not this tarball and does not
+// count, and neither do the kit's own files, which name both.
 //
 //   node scripts/release-pack.mjs --tarball <path to the packed release tarball>
 import { spawnSync } from "node:child_process"
@@ -13,6 +15,8 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 export const STAGE_SCRIPTS = ["test:pack", "pack-smoke", "check:pack"]
+/** The kit's files that name PACK_TARBALL and PACKED_DIR themselves: they are not a pack stage reading the tarball. */
+const KIT_FILES = ["scripts/release-pack.mjs", "scripts/release-kit.test.mjs"]
 
 /**
  * The pack stage for a package.json. `read(path)` returns a file's text, or undefined when there is no such file.
@@ -34,15 +38,19 @@ export function packStage(pkg, read) {
   )
 }
 
-/** Whether a file under scripts/, test/ or tests/ of the repository at `root` names PACK_TARBALL or PACKED_DIR. */
+/** Whether a text names PACK_TARBALL or PACKED_DIR as a whole word, not as part of a longer name. */
+export const namesTarball = (text) => /(?<!\w)(?:PACK_TARBALL|PACKED_DIR)(?!\w)/.test(text)
+
+/** Whether a file under scripts/, test/ or tests/ of the repository at `root`, other than the kit's, names PACK_TARBALL or PACKED_DIR. */
 export function readsTarball(root) {
+  const kit = new Set(KIT_FILES.map((path) => join(root, path)))
   const walk = (dir) => {
     if (!existsSync(dir)) return false
     for (const name of readdirSync(dir)) {
       const full = join(dir, name)
       if (statSync(full).isDirectory()) {
         if (name !== "node_modules" && walk(full)) return true
-      } else if (/\.(m?[jt]sx?|sh)$/.test(name) && /PACK_TARBALL|PACKED_DIR/.test(readFileSync(full, "utf8"))) {
+      } else if (/\.(m?[jt]sx?|sh)$/.test(name) && !kit.has(full) && namesTarball(readFileSync(full, "utf8"))) {
         return true
       }
     }

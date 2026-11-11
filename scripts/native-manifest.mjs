@@ -1,5 +1,6 @@
-// The rules for `manifest/native.json` (NATIVE-DESIGN §2.2), shared by release-commit.mjs, check-release-shape.mjs and
-// attach-native.mjs. A plugin with no native part has no manifest, and none of this applies to it.
+// The rules for `manifest/native.json` (NATIVE-DESIGN §2.2), shared by release-commit.mjs, release-github.mjs,
+// check-release-shape.mjs and attach-native.mjs. A plugin with no native part has no manifest, and none of this applies
+// to it.
 //
 // The manifest names the tag, the master commit and the native run its binaries were built from. Each module lists per
 // platform the release asset (a gzip, served from this repository's release on the tag) and the executable it holds,

@@ -37,21 +37,74 @@ npm run check
 
 ## Releasing
 
-Every plugin releases as `v0.0.0`, and it installs from that GitHub tag. The release is one commit on top of a `master`
-head that CI passed, and the tag points at it.
+Each release is the GitHub tag `v<version>`, where `<version>` is the `version` in `package.json`, and users install from
+that tag. The release is one commit on top of a `master` head that CI passed, and the tag points at it. The release
+workflow makes both, in GitHub Actions: nobody builds, commits or tags a release on their own machine, and no personal
+key signs it.
 
-1. Set `version` to `0.0.0` in `package.json`, date the `## [0.0.0]` entry in `CHANGELOG.md`, then run `npm run check`.
+While changes land, their notes go under `## [Unreleased]` at the top of `CHANGELOG.md`. Each earlier GitHub release is
+a `## [x.y.z] - YYYY-MM-DD` heading below it, newest first, and the npm history stays last, under
+`## Earlier releases on npm`.
+
+1. On `master`, set `version` in `package.json` to the new version, and change every install spec in the README,
+   `CONTRIBUTING.md` and `docs/` to `#v<version>` (`test/docs.test.ts` fails until they match). Then run
+   `node scripts/changelog.mjs release`: it turns `## [Unreleased]` into `## [<version>] - <today>`, above the earlier
+   releases, and refuses a CHANGELOG it cannot shape. Run `npm run check`.
 2. Push that commit to `master`, and wait for CI to pass on it.
-3. In a clean checkout of `master` at that commit, run `node scripts/release-commit.mjs --ci-sha <its full sha>`. It builds
-   `dist/`, removes the lifecycle scripts, and creates the signed commit and the signed annotated tag `v0.0.0`. It never
-   pushes; `--dry-run` shows the change first.
-4. Push the tag only: `git push origin v0.0.0`.
-5. Approve the run in the `release` environment. The release workflow checks the tag and its commit, installs the tag on
-   each stock OpenCode host (2.2.3 to 2.2.6), packs it, and creates the GitHub Release with the notes, the tarball and
-   `SHA256SUMS`.
+3. Start the release with that commit's full sha:
+   `gh workflow run release.yml --ref master -f sha=<full sha>`, or from Actions → release →
+   Run workflow, on `master`.
+4. Read the run's summary, then approve the `release` environment. Only the owner approves a release. Agents never
+   approve one, never call the deployment-approval API, and never bypass a ruleset or the environment; the kit's scripts
+   refuse those calls.
+5. Check the published Release: not a draft, its notes, and every asset against `SHA256SUMS`.
 
-A tag that already exists stops step 3. Delete the old tag and its Release first, then start again.
+Before the approval, the workflow:
+- **plans:** refuses a run that is not on `master`, a sha that is not `master`'s head, a sha without a successful `ci.yml`
+  push run, a version that is not `x.y.z`, a CHANGELOG whose newest release is not this version, a release that does not
+  move forward from the last published Release, a leftover `release/v<version>` branch, a native run that did not build
+  this sha on `master`, by hand, with success, and a missing `native_run` (or one given to a plugin that is not native);
+- **builds** `dist/` with `npm ci --ignore-scripts` and `npm run build`, with a read-only token, and writes the release
+  files: `dist/`, `package.json` without its lifecycle scripts, and the vetted native manifest;
+- **commits** them on a temporary branch `release/v<version>` at the parent, through GitHub's API with the workflow's token,
+  so GitHub signs the commit (author `github-actions[bot]`, committer GitHub). This job runs no npm. It refuses a commit
+  that GitHub does not verify, or whose parent or tree is not the one the files give;
+- **verifies** on a fresh runner: the commit's identity, one parent on `master`, `package.json` exactly the parent's
+  without the lifecycle scripts, only regular files in the allowed paths, no `package.json` under `dist/`, and a second,
+  independent build of the parent equal to the committed `dist/` byte for byte;
+- **installs** the release commit with `plugin add` on each stock OpenCode host (2.2.3 to 2.2.6);
+- **stages** the Release: packs the commit, runs the pack stage against that tarball, verifies the attested native files,
+  writes `SHA256SUMS` and the notes (the version's CHANGELOG section), and shows them all in the run summary.
 
+After the approval, it checks the staged files against `SHA256SUMS`, checks everything again, creates the annotated tag
+`v<version>` on the release commit (tagger `github-actions[bot]`, unsigned), checks the tag, creates the Release with the
+notes, the tarball, the native files and `SHA256SUMS`, and deletes `release/v<version>`. The tag keeps the commit.
+
+GitHub's signature and the bot identity show only that GitHub made the commit through its API for the workflow; anyone
+with write access can make such a commit. What ties the release to `master` is its content: one parent CI passed, the
+exact `package.json`, the allowed paths and the byte-for-byte rebuild. Never relax those because the commit is signed.
+
+**A rejected, expired or failed run** leaves nothing behind: the `cleanup` job deletes `release/v<version>` when it points
+at the parent or at that run's commit, and never touches another branch. No tag exists before the approval, so the
+version is not burned: fix `master` and start again. If `cleanup` itself failed, the next run refuses until the branch
+is deleted: `gh api -X DELETE repos/joe-broadhead/opencode-release-rehearsal/git/refs/heads/release/v<version>`.
+
+**Resume.** If the run fails after creating the tag and before the Release is complete, start it again with the same `sha`. The plan finds the kit's tag on a release commit on that sha with no published Release, and resumes:
+it makes no new commit, checks and installs the tagged commit, stages the files, and after a new approval reuses the tag
+and adds what the Release lacks. Delete a draft Release a failed upload left first: the publish step refuses a draft.
+Any other existing tag is refused: release the next version.
+
+The repository's tag ruleset keeps a `v*` tag from being moved or deleted. A stray `v*` tag, one that never became a
+Release, does not block later releases: only published Releases count, and drafts do not. Its version cannot be
+released, so release the next one. To remove the tag anyway, an admin disables the `release tags` ruleset, deletes the
+tag, and restores the ruleset exactly as it was.
+
+The release kit is these files, the same in every plugin: `scripts/release-rules.mjs`, `scripts/release-commit.mjs`,
+`scripts/release-github.mjs`, `scripts/check-release-shape.mjs`, `scripts/changelog.mjs`, `scripts/release-version.mjs`,
+`scripts/release-pack.mjs`, `scripts/publish-release.mjs`, `scripts/attach-native.mjs`, `scripts/native-manifest.mjs`,
+`scripts/tested-hosts.mjs`, `scripts/check-release-plugin-add.sh`, `scripts/release-kit.test.mjs` and
+`.github/workflows/release.yml`. Do not re-run the older `apply-release-kit.mjs`: it writes back the kit that could
+release only `v0.0.0`.
 
 Each release has its own tag, and a Git install does not update by itself. To move to a newer release, remove the old entry with `opencode plugin remove github:joe-broadhead/opencode-tavily#v0.0.0`, then add the new tag with `opencode plugin add github:joe-broadhead/opencode-tavily#v<version>`.
 

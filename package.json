@@ -38,11 +38,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tui.json --noEmit",
     "build": "node scripts/build.mjs",
     "test": "bun test test/unit",
+    "test:kit": "node --test scripts/release-kit.test.mjs",
     "test:tui": "bun test --preload @opentui/solid/preload test/tui",
     "test:host": "node tools/host-tests.mjs",
     "test:pack": "bun test test/pack",
     "lint": "bun test test/forbidden && node scripts/check-copies.mjs",
-    "check": "npm run typecheck && npm run build && npm test && npm run test:tui && npm run test:host && npm run test:pack && npm run lint && npm run icons && npm run actionlint",
+    "check": "npm run typecheck && npm run build && npm test && npm run test:kit && npm run test:tui && npm run test:host && npm run test:pack && npm run lint && npm run icons && npm run actionlint",
     "check:upstream": "bun tools/check-upstream.mjs",
     "icons": "node scripts/check-icons.mjs",
     "actionlint": "node scripts/check-actionlint.mjs"
