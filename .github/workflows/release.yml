@@ -1,0 +1,403 @@
+name: release
+
+# Releases v<package.json version> from a master commit CI passed. Started by hand, never by a tag:
+#   gh workflow run release.yml --ref master -f sha=<master head CI passed> [-f native_run=<native run id on it>]
+# The workflow builds dist/, makes the release commit on a temporary branch release/v<version> with this run's token
+# (GitHub signs it), checks it, installs it on every tested host, packs it and stages the Release files. Then it waits
+# for the owner's approval of the `release` environment. Only after that does it create the tag v<version> on that commit
+# and the GitHub Release. Agents never approve: only the owner approves a release (CONTRIBUTING.md, "Releasing").
+#
+# Least privilege: contents: write is held only by `commit`, `publish` and `cleanup`, which install nothing and run no
+# build; every job that runs repository or dependency code has a read-only token. No secret is used. Nothing touches npm.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: The full sha of the master head whose CI passed, the release commit's parent
+        required: true
+        type: string
+      native_run:
+        description: For a native plugin, the id of the native workflow run on that sha; empty otherwise
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Set when the kit is copied into a plugin: the plugin's status RPC id and its skill id (the stock check reads them).
+  PLUGIN_RPC: tavily.web
+  PLUGIN_SKILL: tavily
+  PARENT: ${{ inputs.sha }}
+
+jobs:
+  # Every refusal before anything is built or written: master's head is the sha, CI passed on it, the version and the
+  # CHANGELOG are ready, the release moves forward, no leftover branch, and the native run is right. A tag the kit made
+  # on this sha that never became a Release makes this a resume: no new commit, the same tag.
+  plan:
+    name: plan the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # the CI run and the native run on the sha
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      hosts: ${{ steps.plan.outputs.hosts }}
+      native: ${{ steps.plan.outputs.native }}
+      mode: ${{ steps.plan.outputs.mode }}
+      commit: ${{ steps.plan.outputs.commit }}
+      ci_run: ${{ steps.plan.outputs.ci_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - id: plan
+        name: Plan, or refuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN: ${{ inputs.native_run }}
+        run: node scripts/release-github.mjs plan --sha "$PARENT" --native-run "$NATIVE_RUN" --manifest-out "$RUNNER_TEMP/native/native.json"
+      - name: Keep the vetted native manifest for the build
+        if: steps.plan.outputs.native == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-manifest-vetted
+          path: ${{ runner.temp }}/native/native.json
+          if-no-files-found: error
+
+  # Runs npm and the repository's build, with a read-only token and no credentials in the checkout.
+  build:
+    name: build the release files
+    needs: plan
+    if: needs.plan.outputs.mode == 'new'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
+          no-cache: true
+      - if: needs.plan.outputs.native == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-manifest-vetted
+          path: ${{ runner.temp }}/native
+      - name: Build dist/, and write the release commit's files
+        env:
+          NATIVE: ${{ needs.plan.outputs.native }}
+        run: |
+          if [ "$NATIVE" = "true" ]; then manifest="--manifest $RUNNER_TEMP/native/native.json"; else manifest=""; fi
+          # shellcheck disable=SC2086
+          node scripts/release-commit.mjs --sha "$PARENT" --out "$RUNNER_TEMP/release-files" $manifest
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release-files
+          if-no-files-found: error
+          include-hidden-files: true
+
+  # The first write: the temporary branch release/v<version> at the parent, and one commit on it through GitHub's API,
+  # so GitHub signs it. Runs no npm and no repository build: node, the kit's scripts and gh only.
+  commit:
+    name: make the release commit
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # the temporary branch and its one commit
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+      tree: ${{ steps.commit.outputs.tree }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release-files
+      - id: commit
+        name: Commit the release files on release/v<version>, and check what GitHub made
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          NATIVE: ${{ needs.plan.outputs.native }}
+        run: node scripts/release-github.mjs commit --files "$RUNNER_TEMP/release-files" --parent "$PARENT" --tag "$TAG" --native "$NATIVE"
+
+  # A fresh runner checks the release commit, then rebuilds the parent on its own and compares dist/ byte for byte.
+  verify:
+    name: verify the release commit
+    needs: [plan, commit]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.commit.result == 'success' || (needs.plan.outputs.mode == 'resume' && needs.commit.result == 'skipped')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # the native run, for a native plugin
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      MODE: ${{ needs.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
+          no-cache: true
+      - name: Check the release commit (GitHub-verified, by the workflow, one parent on master, the allowed change, no lifecycle scripts, the native manifest), and rebuild its parent byte for byte
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$MODE" = "resume" ]; then target="--tag $TAG"; else target="--commit $COMMIT --tag-name $TAG"; fi
+          # shellcheck disable=SC2086
+          node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions
+          [ "$(git rev-parse "$COMMIT^")" = "$PARENT" ] || { echo "::error::the release commit's parent is not $PARENT"; exit 1; }
+          git worktree add --detach "$RUNNER_TEMP/parent" "$PARENT"
+          (cd "$RUNNER_TEMP/parent" && npm ci --ignore-scripts && npm run build)
+          # shellcheck disable=SC2086
+          node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions --rebuilt "$RUNNER_TEMP/parent"
+
+  # The OpenCode hosts of the plugin's TESTED_HOSTS install the exact release commit with `plugin add`, from a tag that
+  # exists only on this runner (no credentials, a read-only token: it cannot be pushed).
+  hosts:
+    name: stock OpenCode ${{ matrix.host }}
+    needs: [plan, commit, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install the release commit as a Git plugin on the stock host, in an isolated HOME, and check it loads
+        run: |
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || git tag "$TAG" "$COMMIT"
+          [ "$(git rev-parse "$TAG^{commit}")" = "$COMMIT" ] || { echo "::error::$TAG is not on the release commit"; exit 1; }
+          sh scripts/check-release-plugin-add.sh "${{ matrix.host }}" "$GITHUB_WORKSPACE" "$TAG" "$RUNNER_TEMP/host" "$PLUGIN_SKILL" "$PLUGIN_RPC"
+
+  # Before the approval, so the owner approves known bytes: the pack stage against the exact tarball, the native files
+  # verified and attested, SHA256SUMS and the notes. The run summary shows them all.
+  stage:
+    name: stage the Release files
+    needs: [plan, commit, verify, hosts]
+    if: ${{ !cancelled() && needs.hosts.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # the native run's artifacts
+      attestations: read # the attestation of each native file
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      MODE: ${{ needs.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles
+          no-cache: true
+      - name: Pack the release commit and run the repository's own pack stage against that exact tarball
+        run: |
+          npm ci --ignore-scripts
+          mkdir -p "$RUNNER_TEMP/assets/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/assets/release"
+          node scripts/release-pack.mjs --tarball "$(ls "$RUNNER_TEMP"/assets/release/*.tgz)"
+      # Native plugins only (a release commit with no manifest/native.json skips this step). The run is the one the
+      # manifest pins: its artifacts must match the manifest's sizes and sha256, the gzips must hold the pinned
+      # executables, and each file must carry a verified attestation. Nothing is built here.
+      - name: Verify and stage the pinned native binaries and licence files
+        if: hashFiles('manifest/native.json') != ''
+        run: node scripts/attach-native.mjs --out "$RUNNER_TEMP/assets/release/native"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Write SHA256SUMS and the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/assets/release"
+          list="$RUNNER_TEMP/sums-list.txt"
+          find . -type f ! -name SHA256SUMS | sed 's#^\./##' | sort > "$list"
+          # Each line names the asset (the file's base name, which is how the Release stores it), not its folder.
+          while IFS= read -r file; do sha256sum "$file" | sed "s#  .*/#  #"; done < "$list" > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          if [ "$MODE" = "resume" ]; then target="--tag $TAG"; else target="--commit $COMMIT --tag-name $TAG"; fi
+          # shellcheck disable=SC2086
+          node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions --notes "$RUNNER_TEMP/assets/notes.md"
+      - name: Summarise what the approval releases
+        env:
+          TREE: ${{ needs.commit.outputs.tree }}
+          NATIVE_RUN: ${{ inputs.native_run }}
+          CI_RUN: ${{ needs.plan.outputs.ci_run }}
+        run: |
+          server="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          {
+            echo "## Approving \`release\` creates the tag $TAG and its GitHub Release"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag | \`$TAG\` (mode: $MODE) |"
+            echo "| Parent (master, CI passed) | [\`$PARENT\`]($server/commit/$PARENT), CI run [$CI_RUN]($server/actions/runs/$CI_RUN) |"
+            echo "| Release commit | [\`$COMMIT\`]($server/commit/$COMMIT)$([ "$MODE" = "new" ] && echo " on [\`release/$TAG\`]($server/tree/release/$TAG), tree \`$TREE\`") |"
+            if [ -n "$NATIVE_RUN" ]; then echo "| Native run | [$NATIVE_RUN]($server/actions/runs/$NATIVE_RUN) |"; fi
+            echo
+            echo "### SHA256SUMS"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/assets/release/SHA256SUMS"
+            echo '```'
+            echo
+            echo "### Release notes"
+            echo
+            cat "$RUNNER_TEMP/assets/notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+
+  # The gate: the owner approves the `release` environment. Then the staged bytes are checked, everything is checked
+  # again, and the tag and the Release are created. Builds nothing and runs no repository script.
+  publish:
+    name: tag and publish the Release
+    needs: [plan, commit, stage]
+    if: ${{ !cancelled() && needs.stage.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write # the tag and the Release
+      actions: read # the native run, for a native plugin
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      MODE: ${{ needs.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - name: Check the staged files against SHA256SUMS
+        run: node scripts/release-github.mjs sums --dir "$RUNNER_TEMP/assets/release"
+      - name: Check again, then create the tag on the release commit (or reuse the kit's tag there)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-github.mjs tag --tag "$TAG" --commit "$COMMIT" --parent "$PARENT" --mode "$MODE"
+      - name: Check the tagged release, and that its notes are the staged ones
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/check-release-shape.mjs --tag "$TAG" --branch origin/master --verify github-api --identity github-actions --notes "$RUNNER_TEMP/notes.md"
+          cmp "$RUNNER_TEMP/notes.md" "$RUNNER_TEMP/assets/notes.md"
+      # Creates the Release, or, on a re-run, adds the kit's missing files. It never deletes or replaces an asset, and it
+      # leaves assets it does not know (attached later by hand) alone.
+      - name: Create the GitHub Release on the tag, or add its missing kit files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-release.mjs --tag "$TAG" --dir "$RUNNER_TEMP/assets/release" --notes "$RUNNER_TEMP/notes.md"
+      - name: Delete release/v<version>; the tag keeps the commit
+        if: env.MODE == 'new'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-github.mjs cleanup --tag "$TAG" --parent "$PARENT" --commit "$COMMIT"
+
+  # Deletes release/v<version> whatever happened: a failed check, a rejected or expired approval, a cancelled run. Only
+  # when it points at the parent or at this run's release commit; never master, never another commit.
+  cleanup:
+    name: delete the temporary branch
+    needs: [plan, commit, publish]
+    if: ${{ always() && needs.plan.outputs.mode == 'new' && needs.commit.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # deleting release/v<version>
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Delete release/v<version> if it is still there
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.commit.outputs.commit }}
+        run: node scripts/release-github.mjs cleanup --tag "$TAG" --parent "$PARENT" --commit "$COMMIT"
