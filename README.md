@@ -1,3 +1,9 @@
+> [!WARNING]
+> **TEST ONLY. Do not install this repository.** It is a scratch rehearsal of the release workflow of the OpenCode
+> plugin family (a release built and committed in GitHub Actions, tagged only after the owner's approval). Its code is
+> a copy of [opencode-tavily](https://github.com/joe-broadhead/opencode-tavily); use that plugin instead. This
+> repository will be deleted after the rehearsal.
+
 # Tavily for OpenCode
 
 Search, extract, map, crawl and research the web from OpenCode with Tavily's official MCP server.

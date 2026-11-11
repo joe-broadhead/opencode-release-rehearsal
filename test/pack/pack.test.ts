@@ -24,7 +24,7 @@ const USAGE_URL = "https://api.tavily.com/usage"
 // harness.ts).
 setDefaultTimeout(300_000)
 
-const NAME = "@joe-broadhead/opencode-tavily"
+const NAME = "@joe-broadhead/opencode-release-rehearsal"
 const ALLOWED = /^(package\.json|README\.md|LICENSE|CHANGELOG\.md|assets\/icon(-128|-256)?\.(svg|png)|dist\/.+|skills\/.+)$/
 const REQUIRED = [
   "package.json",
@@ -110,7 +110,7 @@ describe("the install", () => {
   test("adds only this package: no peers, no dependencies, no bundled modules", () => {
     const visible = (directory: string) => readdirSync(directory).filter((entry) => !entry.startsWith("."))
     expect(visible(join(project, "node_modules"))).toEqual(["@joe-broadhead"])
-    expect(visible(join(project, "node_modules", "@joe-broadhead"))).toEqual(["opencode-tavily"])
+    expect(visible(join(project, "node_modules", "@joe-broadhead"))).toEqual(["opencode-release-rehearsal"])
     expect(existsSync(join(installed, "node_modules"))).toBe(false)
   })
 

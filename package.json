@@ -1,7 +1,7 @@
 {
-  "name": "@joe-broadhead/opencode-tavily",
+  "name": "@joe-broadhead/opencode-release-rehearsal",
   "version": "0.0.0",
-  "description": "Unofficial OpenCode plugin for Tavily web search, extract, map, crawl and research",
+  "description": "TEST ONLY: a rehearsal of the release workflow, copied from opencode-tavily. Do not install.",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -10,11 +10,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joe-broadhead/opencode-tavily.git"
+    "url": "git+https://github.com/joe-broadhead/opencode-release-rehearsal.git"
   },
-  "homepage": "https://github.com/joe-broadhead/opencode-tavily#readme",
+  "homepage": "https://github.com/joe-broadhead/opencode-release-rehearsal#readme",
   "bugs": {
-    "url": "https://github.com/joe-broadhead/opencode-tavily/issues"
+    "url": "https://github.com/joe-broadhead/opencode-release-rehearsal/issues"
   },
   "type": "module",
   "exports": {
