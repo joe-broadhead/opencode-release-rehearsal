@@ -1,0 +1,162 @@
+name: release
+
+# Creates the GitHub Release for a v* tag. The tag points at a release commit that the release kit built on master
+# (scripts/release-commit.mjs); this run verifies that commit and then publishes it. Nothing here touches npm.
+# One approval per release: only the `release` job uses the `release` environment, so the owner approves once, after
+# every verify job has passed. The verify jobs run on the tag push with a read-only token and no secrets.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Set when the kit is copied into a plugin: the plugin's status RPC id and its skill id (the stock check reads them).
+  PLUGIN_RPC: tavily.web
+  PLUGIN_SKILL: tavily
+
+jobs:
+  # The OpenCode hosts this release is tested on come from the plugin's own TESTED_HOSTS list, read here, so the matrix
+  # below never names a version (scripts/tested-hosts.mjs; the list is the plugin's, in src/).
+  setup:
+    name: read the tested OpenCode hosts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      hosts: ${{ steps.hosts.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - id: hosts
+        name: Read TESTED_HOSTS from the tag
+        run: node scripts/tested-hosts.mjs >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: verify the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # the native run's facts, for a native plugin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
+          no-cache: true
+      - name: "Check the tag (annotated, signed by the owner, v0.0.0, one parent on master, the allowed change, no lifecycle scripts, and the native manifest when there is one)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release-shape.mjs --tag "$GITHUB_REF_NAME" --branch origin/master --verify github-api --notes "$RUNNER_TEMP/notes.md"
+      - name: Rebuild the tag's parent and compare dist/ byte for byte
+        run: |
+          parent="$(git rev-parse "$GITHUB_REF_NAME^")"
+          git worktree add --detach "$RUNNER_TEMP/parent" "$parent"
+          (cd "$RUNNER_TEMP/parent" && npm ci --ignore-scripts && npm run build)
+          node scripts/check-release-shape.mjs --tag "$GITHUB_REF_NAME" --branch origin/master --verify github-api --rebuilt "$RUNNER_TEMP/parent"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  hosts:
+    name: stock OpenCode ${{ matrix.host }}
+    needs: [setup, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.setup.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install the tag as a Git plugin on the stock host, in an isolated HOME, and check it loads
+        run: sh scripts/check-release-plugin-add.sh "${{ matrix.host }}" "$GITHUB_WORKSPACE" "$GITHUB_REF_NAME" "$RUNNER_TEMP/host" "$PLUGIN_SKILL" "$PLUGIN_RPC"
+
+  release:
+    name: create the GitHub Release
+    needs: [verify, hosts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write # the Release
+      actions: read # the native run's artifacts
+      attestations: read # the attestation of each native file
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles
+          no-cache: true
+      - name: Pack the tag and run the repository's own pack stage against that exact tarball
+        run: |
+          npm ci --ignore-scripts
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release"
+          node scripts/release-pack.mjs --tarball "$(ls "$RUNNER_TEMP"/release/*.tgz)"
+      # No second gate here, on purpose: the download runs inside the approved release job, and every file is checked
+      # against the manifest's sizes and sha256s and must carry a verified attestation before it is attached.
+      # Native plugins only (a repository with no manifest/native.json skips this step). The run is the one the manifest
+      # pins: its artifacts must match the manifest's sizes and sha256, the gzips must hold the pinned executables, and
+      # each file must carry a verified attestation. The release job builds nothing (NATIVE-DESIGN §4).
+      - name: Verify and stage the pinned native binaries and licence files
+        if: hashFiles('manifest/native.json') != ''
+        run: node scripts/attach-native.mjs --out "$RUNNER_TEMP/release/native"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Write SHA256SUMS and the release notes
+        run: |
+          cd "$RUNNER_TEMP/release"
+          list="$RUNNER_TEMP/sums-list.txt"
+          find . -type f ! -name SHA256SUMS | sed 's#^\./##' | sort > "$list"
+          # Each line names the asset (the file's base name, which is how the Release stores it), not its folder.
+          while IFS= read -r file; do sha256sum "$file" | sed "s#  .*/#  #"; done < "$list" > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+          cd "$GITHUB_WORKSPACE" && node scripts/check-release-shape.mjs --tag "$GITHUB_REF_NAME" --branch origin/master --verify github-api --notes "$RUNNER_TEMP/notes.md"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # Creates the Release, or, on a re-run, adds the kit's missing files. It never deletes or replaces an asset, and it
+      # leaves assets it does not know (attached later by hand) alone.
+      - name: Create the GitHub Release on the tag, or add its missing kit files
+        run: node scripts/publish-release.mjs --tag "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/release" --notes "$RUNNER_TEMP/notes.md"
+        env:
+          GH_TOKEN: ${{ github.token }}
