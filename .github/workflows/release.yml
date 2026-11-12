@@ -7,8 +7,16 @@ name: release
 # for the owner's approval of the `release` environment. Only after that does it create the tag v<version> on that commit
 # and the GitHub Release. Agents never approve: only the owner approves a release (CONTRIBUTING.md, "Releasing").
 #
-# Least privilege: contents: write is held only by `commit`, `publish` and `cleanup`, which install nothing and run no
-# build; every job that runs repository or dependency code has a read-only token. No secret is used. Nothing touches npm.
+# Least privilege: contents: write is held only by `commit`, `publish` and `cleanup`. Jobs are of two kinds, never
+# mixed. The ones that run repository or dependency code (`build`, `rebuild`, `hosts`, `pack`) have no write token: their
+# permissions are contents: read only, no step gets GH_TOKEN, and setup-node and setup-bun get an empty token. What they
+# still expose, and only read-only: actions/checkout requires a token and fetches with the job's contents: read token,
+# and its post step, like the upload-artifact steps (which carry the runner's artifact token), runs after repository
+# code on the same runner, so that code could reach a read-only token for this public repository, and upload an
+# artifact under another name; every download below is by id and is checked again. The jobs that use the API (`plan`,
+# `commit`, `verify`, `stage`, `publish`, `cleanup`) check out the exact commit fresh, check that its scripts/ and
+# .github/ are the parent's, and run only the kit's scripts. Jobs pass files only as artifacts downloaded by the id the uploading job gave,
+# and each is checked again on arrival. No secret is used. Nothing touches npm.
 
 on:
   workflow_dispatch:
@@ -38,7 +46,7 @@ env:
 jobs:
   # Every refusal before anything is built or written: master's head is the sha, CI passed on it, the version and the
   # CHANGELOG are ready, the release moves forward, no leftover branch, and the native run is right. A tag the kit made
-  # on this sha that never became a Release makes this a resume: no new commit, the same tag.
+  # on this sha that never became a Release makes this a resume: no new commit, the same tag. Kit scripts only.
   plan:
     name: plan the release
     runs-on: ubuntu-24.04
@@ -54,9 +62,12 @@ jobs:
       mode: ${{ steps.plan.outputs.mode }}
       commit: ${{ steps.plan.outputs.commit }}
       ci_run: ${{ steps.plan.outputs.ci_run }}
+      manifest_sha256: ${{ steps.plan.outputs.manifest_sha256 }}
+      manifest_artifact: ${{ steps.manifest.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -70,7 +81,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NATIVE_RUN: ${{ inputs.native_run }}
         run: node scripts/release-github.mjs plan --sha "$PARENT" --native-run "$NATIVE_RUN" --manifest-out "$RUNNER_TEMP/native/native.json"
-      - name: Keep the vetted native manifest for the build
+      - id: manifest
+        name: Keep the vetted native manifest for the build
         if: steps.plan.outputs.native == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -78,7 +90,7 @@ jobs:
           path: ${{ runner.temp }}/native/native.json
           if-no-files-found: error
 
-  # Runs npm and the repository's build, with a read-only token and no credentials in the checkout.
+  # Runs npm and the repository's build. No write token, no credentials in the checkout.
   build:
     name: build the release files
     needs: plan
@@ -87,23 +99,35 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      files_artifact: ${{ steps.files.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
+          token: '' # no token: this job runs repository code
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
           no-cache: true
-      - if: needs.plan.outputs.native == 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+          token: '' # no token: this job runs repository code
+      - name: Refuse an empty artifact id
+        if: needs.plan.outputs.native == 'true'
+        env:
+          ARTIFACT_ID: ${{ needs.plan.outputs.manifest_artifact }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      # Exactly the artifact the uploading job named, by its id, not one that has the same name.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.native == 'true'
         with:
-          name: native-manifest-vetted
+          artifact-ids: ${{ needs.plan.outputs.manifest_artifact }}
           path: ${{ runner.temp }}/native
       - name: Build dist/, and write the release commit's files
         env:
@@ -112,7 +136,8 @@ jobs:
           if [ "$NATIVE" = "true" ]; then manifest="--manifest $RUNNER_TEMP/native/native.json"; else manifest=""; fi
           # shellcheck disable=SC2086
           node scripts/release-commit.mjs --sha "$PARENT" --out "$RUNNER_TEMP/release-files" $manifest
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
           path: ${{ runner.temp }}/release-files
@@ -120,7 +145,8 @@ jobs:
           include-hidden-files: true
 
   # The first write: the temporary branch release/v<version> at the parent, and one commit on it through GitHub's API,
-  # so GitHub signs it. Runs no npm and no repository build: node, the kit's scripts and gh only.
+  # so GitHub signs it. Kit scripts only. The files are checked again here: paths.txt, the allowed set, package.json,
+  # and the native manifest byte for byte as the plan vetted it.
   commit:
     name: make the release commit
     needs: [plan, build]
@@ -135,14 +161,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Refuse an empty artifact id
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.files_artifact }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      # Exactly the artifact the uploading job named, by its id, not one that has the same name.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release-files
+          artifact-ids: ${{ needs.build.outputs.files_artifact }}
           path: ${{ runner.temp }}/release-files
       - id: commit
         name: Commit the release files on release/v<version>, and check what GitHub made
@@ -150,15 +183,55 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
           NATIVE: ${{ needs.plan.outputs.native }}
-        run: node scripts/release-github.mjs commit --files "$RUNNER_TEMP/release-files" --parent "$PARENT" --tag "$TAG" --native "$NATIVE"
+          MANIFEST_SHA256: ${{ needs.plan.outputs.manifest_sha256 }}
+        run: node scripts/release-github.mjs commit --files "$RUNNER_TEMP/release-files" --parent "$PARENT" --tag "$TAG" --native "$NATIVE" --manifest-sha256 "$MANIFEST_SHA256"
 
-  # A fresh runner checks the release commit, then rebuilds the parent on its own and compares dist/ byte for byte.
-  verify:
-    name: verify the release commit
+  # An independent build of the parent, on its own runner. No write token.
+  rebuild:
+    name: rebuild the parent
     needs: [plan, commit]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.commit.result == 'success' || (needs.plan.outputs.mode == 'resume' && needs.commit.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      dist_artifact: ${{ steps.dist.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+          token: '' # no token: this job runs repository code
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
+          no-cache: true
+          token: '' # no token: this job runs repository code
+      - name: Build the parent
+        run: npm ci --ignore-scripts && npm run build
+      - id: dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rebuilt-dist
+          path: ${{ github.workspace }}/dist
+          if-no-files-found: error
+          include-hidden-files: true
+
+  # A fresh checkout of the release commit: its identity (GitHub API), one parent on master, the allowed change, no
+  # lifecycle scripts, the native manifest, and dist/ byte for byte equal to the independent rebuild. Kit scripts only.
+  verify:
+    name: verify the release commit
+    needs: [plan, commit, rebuild]
+    if: ${{ !cancelled() && needs.rebuild.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read # the native run, for a native plugin
@@ -177,25 +250,29 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Refuse a release commit whose scripts/ or .github/ differ from the parent's
+        run: |
+          git diff --quiet "$PARENT" "$COMMIT" -- scripts .github || { echo "::error::the release commit changes scripts/ or .github/, so no kit script runs from it"; exit 1; }
+      - name: Refuse an empty artifact id
+        env:
+          ARTIFACT_ID: ${{ needs.rebuild.outputs.dist_artifact }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      # Exactly the artifact the uploading job named, by its id, not one that has the same name.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
-          no-cache: true
-      - name: Check the release commit (GitHub-verified, by the workflow, one parent on master, the allowed change, no lifecycle scripts, the native manifest), and rebuild its parent byte for byte
+          artifact-ids: ${{ needs.rebuild.outputs.dist_artifact }}
+          path: ${{ runner.temp }}/parent/dist
+      - name: Check the release commit, and its dist/ against the rebuild
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$MODE" = "resume" ]; then target="--tag $TAG"; else target="--commit $COMMIT --tag-name $TAG"; fi
-          # shellcheck disable=SC2086
-          node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions
           [ "$(git rev-parse "$COMMIT^")" = "$PARENT" ] || { echo "::error::the release commit's parent is not $PARENT"; exit 1; }
-          git worktree add --detach "$RUNNER_TEMP/parent" "$PARENT"
-          (cd "$RUNNER_TEMP/parent" && npm ci --ignore-scripts && npm run build)
+          if [ "$MODE" = "resume" ]; then target="--tag $TAG"; else target="--commit $COMMIT --tag-name $TAG"; fi
           # shellcheck disable=SC2086
           node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions --rebuilt "$RUNNER_TEMP/parent"
 
   # The OpenCode hosts of the plugin's TESTED_HOSTS install the exact release commit with `plugin add`, from a tag that
-  # exists only on this runner (no credentials, a read-only token: it cannot be pushed).
+  # exists only on this runner. No write token.
   hosts:
     name: stock OpenCode ${{ matrix.host }}
     needs: [plan, commit, verify]
@@ -222,24 +299,82 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+          token: '' # no token: this job runs repository code
+      - name: Refuse a release commit whose scripts/ or .github/ differ from the parent's
+        run: |
+          git diff --quiet "$PARENT" "$COMMIT" -- scripts .github || { echo "::error::the release commit changes scripts/ or .github/, so no kit script runs from it"; exit 1; }
       - name: Install the release commit as a Git plugin on the stock host, in an isolated HOME, and check it loads
         run: |
           git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || git tag "$TAG" "$COMMIT"
           [ "$(git rev-parse "$TAG^{commit}")" = "$COMMIT" ] || { echo "::error::$TAG is not on the release commit"; exit 1; }
           sh scripts/check-release-plugin-add.sh "${{ matrix.host }}" "$GITHUB_WORKSPACE" "$TAG" "$RUNNER_TEMP/host" "$PLUGIN_SKILL" "$PLUGIN_RPC"
 
-  # Before the approval, so the owner approves known bytes: the pack stage against the exact tarball, the native files
-  # verified and attested, SHA256SUMS and the notes. The run summary shows them all.
-  stage:
-    name: stage the Release files
-    needs: [plan, commit, verify, hosts]
-    if: ${{ !cancelled() && needs.hosts.result == 'success' }}
+  # Packs the release commit first, with no dependency installed, and keeps that tarball. Then runs the repository's
+  # own pack stage against a copy of it. No write token: what the pack stage does cannot reach the kept tarball.
+  pack:
+    name: pack the release commit
+    needs: [plan, commit, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      tarball_artifact: ${{ steps.tarball.outputs.artifact-id }}
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+          token: '' # no token: this job runs repository code
+      - name: Refuse a release commit whose scripts/ or .github/ differ from the parent's
+        run: |
+          git diff --quiet "$PARENT" "$COMMIT" -- scripts .github || { echo "::error::the release commit changes scripts/ or .github/, so no kit script runs from it"; exit 1; }
+      - name: Pack the release commit, before any dependency is installed
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarball"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/tarball"
+      - id: tarball
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tarball
+          path: ${{ runner.temp }}/tarball
+          if-no-files-found: error
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's build may run bun
+          no-cache: true
+          token: '' # no token: this job runs repository code
+      - name: Run the repository's own pack stage against a copy of that tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack-test"
+          cp "$RUNNER_TEMP"/tarball/*.tgz "$RUNNER_TEMP/pack-test/"
+          npm ci --ignore-scripts
+          node scripts/release-pack.mjs --tarball "$(ls "$RUNNER_TEMP"/pack-test/*.tgz)"
+
+  # Before the approval, so the owner approves known bytes: the kept tarball, the native files verified and attested,
+  # SHA256SUMS and the notes, all shown in the run summary. Kit scripts only, on a fresh checkout.
+  stage:
+    name: stage the Release files
+    needs: [plan, commit, hosts, pack]
+    if: ${{ !cancelled() && needs.hosts.result == 'success' && needs.pack.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
       actions: read # the native run's artifacts
       attestations: read # the attestation of each native file
+    outputs:
+      sums_sha256: ${{ steps.sums.outputs.sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     env:
       COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -255,27 +390,35 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles
-          no-cache: true
-      - name: Pack the release commit and run the repository's own pack stage against that exact tarball
+      - name: Refuse a release commit whose scripts/ or .github/ differ from the parent's
         run: |
-          npm ci --ignore-scripts
-          mkdir -p "$RUNNER_TEMP/assets/release"
-          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/assets/release"
-          node scripts/release-pack.mjs --tarball "$(ls "$RUNNER_TEMP"/assets/release/*.tgz)"
-      # Native plugins only (a release commit with no manifest/native.json skips this step). The run is the one the
-      # manifest pins: its artifacts must match the manifest's sizes and sha256, the gzips must hold the pinned
-      # executables, and each file must carry a verified attestation. Nothing is built here.
+          git diff --quiet "$PARENT" "$COMMIT" -- scripts .github || { echo "::error::the release commit changes scripts/ or .github/, so no kit script runs from it"; exit 1; }
+      - name: Refuse an empty artifact id
+        env:
+          ARTIFACT_ID: ${{ needs.pack.outputs.tarball_artifact }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      # Exactly the artifact the uploading job named, by its id, not one that has the same name.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.pack.outputs.tarball_artifact }}
+          path: ${{ runner.temp }}/assets/release
+      - name: Check that the pack job kept one tarball
+        run: |
+          files="$(find "$RUNNER_TEMP/assets/release" -type f)"
+          if [ "$(printf '%s\n' "$files" | grep -c .)" != 1 ] || ! printf '%s\n' "$files" | grep -q '\.tgz$'; then
+            echo "::error::the release-tarball artifact is not one tarball"
+            exit 1
+          fi
+      # Native plugins only (a release commit with no manifest/native.json skips this step): the run is the one the
+      # manifest pins, its artifacts match the manifest's sizes and sha256, the gzips hold the pinned executables, and
+      # each file carries a verified attestation.
       - name: Verify and stage the pinned native binaries and licence files
         if: hashFiles('manifest/native.json') != ''
         run: node scripts/attach-native.mjs --out "$RUNNER_TEMP/assets/release/native"
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Write SHA256SUMS and the release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - id: sums
+        name: Write SHA256SUMS, and its own sha256 for the approver
         run: |
           cd "$RUNNER_TEMP/assets/release"
           list="$RUNNER_TEMP/sums-list.txt"
@@ -284,15 +427,30 @@ jobs:
           while IFS= read -r file; do sha256sum "$file" | sed "s#  .*/#  #"; done < "$list" > "$RUNNER_TEMP/SHA256SUMS"
           mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
           cat SHA256SUMS
-          cd "$GITHUB_WORKSPACE"
+          echo "sha256=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Write the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           if [ "$MODE" = "resume" ]; then target="--tag $TAG"; else target="--commit $COMMIT --tag-name $TAG"; fi
           # shellcheck disable=SC2086
           node scripts/check-release-shape.mjs $target --branch origin/master --verify github-api --identity github-actions --notes "$RUNNER_TEMP/assets/notes.md"
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+      # The approver reads this on the run page. publish downloads exactly this artifact and refuses unless its
+      # SHA256SUMS has exactly this sha256 and every file matches SHA256SUMS.
       - name: Summarise what the approval releases
         env:
           TREE: ${{ needs.commit.outputs.tree }}
           NATIVE_RUN: ${{ inputs.native_run }}
           CI_RUN: ${{ needs.plan.outputs.ci_run }}
+          SUMS_SHA256: ${{ steps.sums.outputs.sha256 }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
         run: |
           server="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           {
@@ -304,6 +462,8 @@ jobs:
             echo "| Parent (master, CI passed) | [\`$PARENT\`]($server/commit/$PARENT), CI run [$CI_RUN]($server/actions/runs/$CI_RUN) |"
             echo "| Release commit | [\`$COMMIT\`]($server/commit/$COMMIT)$([ "$MODE" = "new" ] && echo " on [\`release/$TAG\`]($server/tree/release/$TAG), tree \`$TREE\`") |"
             if [ -n "$NATIVE_RUN" ]; then echo "| Native run | [$NATIVE_RUN]($server/actions/runs/$NATIVE_RUN) |"; fi
+            echo "| sha256 of SHA256SUMS | \`$SUMS_SHA256\` (publish refuses any other) |"
+            echo "| Staged artifact | \`release-assets\`, id $ARTIFACT_ID, digest \`$ARTIFACT_DIGEST\` |"
             echo
             echo "### SHA256SUMS"
             echo
@@ -315,11 +475,6 @@ jobs:
             echo
             cat "$RUNNER_TEMP/assets/notes.md"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-assets
-          path: ${{ runner.temp }}/assets
-          if-no-files-found: error
 
   # The gate: the owner approves the `release` environment. Then the staged bytes are checked, everything is checked
   # again, and the tag and the Release are created. Builds nothing and runs no repository script.
@@ -348,12 +503,26 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Refuse a release commit whose scripts/ or .github/ differ from the parent's
+        run: |
+          git diff --quiet "$PARENT" "$COMMIT" -- scripts .github || { echo "::error::the release commit changes scripts/ or .github/, so no kit script runs from it"; exit 1; }
+      - name: Refuse an empty artifact id
+        env:
+          ARTIFACT_ID: ${{ needs.stage.outputs.artifact_id }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      # Exactly the artifact the uploading job named, by its id, not one that has the same name.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release-assets
+          artifact-ids: ${{ needs.stage.outputs.artifact_id }}
           path: ${{ runner.temp }}/assets
-      - name: Check the staged files against SHA256SUMS
-        run: node scripts/release-github.mjs sums --dir "$RUNNER_TEMP/assets/release"
+      - name: Check that SHA256SUMS is the one in the run summary, and every staged file against it
+        env:
+          SUMS_SHA256: ${{ needs.stage.outputs.sums_sha256 }}
+        run: node scripts/release-github.mjs sums --dir "$RUNNER_TEMP/assets/release" --sums-sha256 "$SUMS_SHA256"
+      # The pack stage ran in another job; this job, after the approval, runs no repository or dependency code. Every
+      # native file is checked against the release commit's own manifest, executables decompressed.
+      - name: Check every native file against the release commit's manifest/native.json
+        run: node scripts/release-github.mjs native --dir "$RUNNER_TEMP/assets/release" --commit "$COMMIT"
       - name: Check again, then create the tag on the release commit (or reuse the kit's tag there)
         env:
           GH_TOKEN: ${{ github.token }}

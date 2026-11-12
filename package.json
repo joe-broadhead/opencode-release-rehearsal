@@ -1,6 +1,6 @@
 {
   "name": "@joe-broadhead/opencode-release-rehearsal",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "TEST ONLY: a rehearsal of the release workflow, copied from opencode-tavily. Do not install.",
   "keywords": [
     "opencode",

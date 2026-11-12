@@ -101,7 +101,7 @@ function main() {
 
   const repository = process.env.GITHUB_REPOSITORY || originRepository()
   if (!repository) stop("neither GITHUB_REPOSITORY nor a GitHub origin names the repository")
-  const gh = (args) => ghOutput(args)
+  const gh = (args) => ghOutput(args, { repository })
   const read = (path, allow404) => {
     try {
       return api(gh, `repos/${repository}/${path}`, { allow404 })

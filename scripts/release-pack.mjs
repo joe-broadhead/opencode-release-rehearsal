@@ -79,10 +79,9 @@ function main(argv) {
   if (!readsTarball(root)) {
     console.log("WARN no file under scripts/, test/ or tests/ reads PACK_TARBALL or PACKED_DIR: the stage may test its own tarball, not this one")
   }
-  const result = spawnSync(stage.command, stage.args, {
-    stdio: "inherit",
-    env: { ...process.env, PACK_TARBALL: tarball, PACKED_DIR: dirname(tarball) },
-  })
+  const options = { stdio: "inherit", env: { ...process.env, PACK_TARBALL: tarball, PACKED_DIR: dirname(tarball) } }
+  // The program is one of the two the stage names, spelled out, so no kit script runs a program it does not name.
+  const result = stage.command === "npm" ? spawnSync("npm", stage.args, options) : spawnSync(process.execPath, stage.args, options)
   if (result.error) {
     console.error(`release-pack: ${result.error.message}`)
     process.exit(1)
