@@ -5,7 +5,7 @@
 import { spawnSync } from "node:child_process"
 import { basename } from "node:path"
 import { MANIFEST_PATH } from "./native-manifest.mjs"
-import { compareVersions, isReleaseTag } from "./release-version.mjs"
+import { compareVersions, isReleaseTag, VERSION_SOURCE } from "./release-version.mjs"
 
 /** Lifecycle scripts a git install runs, or that npm runs around install and publish. The release commit drops them. */
 export const LIFECYCLE_SCRIPTS = [
@@ -147,54 +147,188 @@ export function fetchReleases(repository, gh) {
   }
 }
 
-/**
- * GitHub calls the kit never makes, whoever asks: approving or rejecting a deployment, changing an environment or a
- * protection rule, and touching rulesets or their bypasses. The release approval is the owner's alone (CONTRIBUTING.md,
- * "Releasing"); the kit refuses these before `gh` runs.
- */
-const FORBIDDEN = [
-  [/pending_deployments/, "approving or rejecting a deployment"],
-  [/deployment_protection_rule/, "answering a deployment protection rule"],
-  [/(^|\/)environments(\/|$|\?)/, "reading or changing an environment"],
-  [/(^|\/)rulesets(\/|$|\?)/, "reading or changing a ruleset"],
-  [/bypass/i, "a ruleset bypass"],
-  [/(^|\/)branches\/[^/]+\/protection/, "changing branch protection"],
-]
+/** The one GraphQL request the kit sends: the release commit (scripts/release-github.mjs commit). */
+export const COMMIT_MUTATION = "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }"
 
-/** GraphQL mutations the kit never sends, for the same reasons. */
-const FORBIDDEN_MUTATIONS = /\b(approveDeployments|rejectDeployments|\w*Environment\w*|\w*Ruleset\w*|\w*BypassRequest\w*|\w*BranchProtectionRule\w*)\s*\(/
+const REPO = "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+const SHA = "[0-9a-f]{40}"
+const TAG = `v${VERSION_SOURCE}`
+const exact = (source) => new RegExp(`^${source}$`)
+const TAG_EXACT = exact(TAG)
+const REPO_EXACT = exact(REPO)
+const SHA_EXACT = exact(SHA)
+
+/** The REST reads the kit makes: `gh api <path>`, nothing else. */
+const READS = [
+  `repos/${REPO}/actions/workflows/ci\\.yml/runs\\?head_sha=${SHA}&event=push&branch=master&per_page=100`,
+  `repos/${REPO}/actions/runs/\\d+`,
+  `repos/${REPO}/git/ref/heads/release/${TAG}`,
+  `repos/${REPO}/git/ref/tags/${TAG}`,
+  `repos/${REPO}/git/tags/${SHA}`,
+  `repos/${REPO}/commits/${SHA}`,
+  `repos/${REPO}/releases\\?per_page=100&page=\\d+`,
+  `repos/${REPO}/compare/${SHA}\\.\\.\\.master`,
+].map(exact)
 
 /**
- * Why `gh` with these arguments, and this stdin for `gh api graphql --input -`, is a call the kit must never make, or
- * undefined. Only the GraphQL query text is read from the input, never the variables (file contents).
+ * JSON.parse that also refuses a key repeated in one object. `gh` sends the raw text, and GitHub may read a repeated key
+ * differently from JSON.parse (which keeps the last), so a body the kit checks must have one meaning only.
  */
-export function forbiddenCall(args, input) {
-  const text = args.join(" ")
-  if (args[0] === "run" && ["approve", "deploy"].includes(args[1])) return "approving a run"
-  for (const [pattern, what] of FORBIDDEN) if (pattern.test(text)) return what
-  const graphql = [...args.filter((arg) => /^query=/.test(arg)).map((arg) => arg.slice("query=".length))]
-  if (input !== undefined) {
-    try {
-      graphql.push(String(JSON.parse(input).query ?? ""))
-    } catch {
-      return "a GraphQL request the kit cannot read"
-    }
+export function strictJson(text) {
+  if (typeof text !== "string") throw new Error("the body is not text")
+  const value = JSON.parse(text)
+  const stack = []
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (c === '"') {
+      let j = i + 1
+      for (;;) {
+        const quote = text.indexOf('"', j)
+        let slashes = 0
+        while (text[quote - 1 - slashes] === "\\") slashes++
+        if (slashes % 2 === 0) {
+          j = quote
+          break
+        }
+        j = quote + 1
+      }
+      const top = stack.at(-1)
+      if (top?.object && top.expectKey) {
+        const key = JSON.parse(text.slice(i, j + 1))
+        if (top.keys.has(key)) throw new Error(`the key ${JSON.stringify(key)} appears twice in one object`)
+        top.keys.add(key)
+        top.expectKey = false
+      }
+      i = j
+    } else if (c === "{") stack.push({ object: true, keys: new Set(), expectKey: true })
+    else if (c === "[") stack.push({ object: false })
+    else if (c === "}" || c === "]") stack.pop()
+    else if (c === "," && stack.at(-1)?.object) stack.at(-1).expectKey = true
   }
-  if (graphql.some((query) => FORBIDDEN_MUTATIONS.test(query))) return "a deployment, environment, ruleset or protection mutation"
-  return undefined
+  return value
 }
 
 /**
- * The GitHub CLI's output, or an error with its message. Refuses a forbidden call before running anything. `input` is
- * sent on stdin (a GraphQL request with --input -).
+ * Whether a repository path is plain: relative, no empty, "." or ".." part, no backslash, NUL or other control character.
+ * REST paths must also have no `%`, `#` or whitespace; file paths may.
  */
-export function ghOutput(args, { input } = {}) {
-  const forbidden = forbiddenCall(args, input)
-  if (forbidden) throw new Error(`refused: the release kit never makes this call (${forbidden}); only the owner approves a release`)
-  const result = spawnSync("gh", args, { encoding: "utf8", input, maxBuffer: 256 * 1024 * 1024 })
+export function plainRepositoryPath(path, { rest = false } = {}) {
+  if (typeof path !== "string" || path === "") return false
+  const control = [...path].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 || char === "\\")
+  if (control || path.startsWith("/") || path.includes("//")) return false
+  if (rest && /[%#\s]/.test(path)) return false
+  return !path.split(rest ? /[/?]/ : "/").some((part) => part === "." || part === "..")
+}
+
+/** Whether a value is a plain object with exactly these keys. */
+const hasKeys = (value, keys) =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+
+/** A JSON object with exactly these keys and no repeated key, or undefined. */
+function bodyWith(input, keys) {
+  let body
+  try {
+    body = strictJson(input)
+  } catch {
+    return undefined
+  }
+  return hasKeys(body, keys) ? body : undefined
+}
+
+/**
+ * Why a GraphQL body is not the release commit's createCommitOnBranch, or undefined: the kit's mutation, on
+ * `repository`'s release/v<version> branch, at an expected head, with the release headline, adding only paths a release
+ * commit may change, and deleting nothing.
+ */
+function commitRequestProblem(input, repository) {
+  const body = bodyWith(input, ["query", "variables"])
+  if (body?.query !== COMMIT_MUTATION) return "a GraphQL request other than the release commit's createCommitOnBranch"
+  const commit = hasKeys(body.variables, ["input"]) ? body.variables.input : undefined
+  if (!hasKeys(commit, ["branch", "message", "fileChanges", "expectedHeadOid"])) return "a createCommitOnBranch whose input is not the release commit's shape"
+  if (!repository || !hasKeys(commit.branch, ["repositoryNameWithOwner", "branchName"]) || commit.branch.repositoryNameWithOwner !== repository) return "a createCommitOnBranch on another repository than GITHUB_REPOSITORY"
+  const match = exact(`release/(${TAG})`).exec(String(commit.branch.branchName))
+  if (!match) return "a createCommitOnBranch on a branch other than release/v<version>"
+  if (!SHA_EXACT.test(String(commit.expectedHeadOid))) return "a createCommitOnBranch without an expected head"
+  if (!hasKeys(commit.message, ["headline"]) || commit.message.headline !== releaseHeadline(match[1])) return "a createCommitOnBranch without the release headline"
+  if (!hasKeys(commit.fileChanges, ["additions"]) || !Array.isArray(commit.fileChanges.additions) || !commit.fileChanges.additions.length) return "a createCommitOnBranch that deletes, or adds nothing"
+  const paths = commit.fileChanges.additions.map((file) => (hasKeys(file, ["path", "contents"]) && typeof file.contents === "string" ? file.path : undefined))
+  if (paths.some((path) => !plainRepositoryPath(path))) return "a createCommitOnBranch that writes a path with an empty, relative, absolute or control part"
+  if (paths.some((path) => !allowedPath(path, { native: true })) || new Set(paths).size !== paths.length) return "a createCommitOnBranch that writes a path outside the release's allowed set"
+  return undefined
+}
+
+/** A plain local path argument: not an option, not empty. */
+const plainPath = (arg) => typeof arg === "string" && arg !== "" && !arg.startsWith("-")
+
+/**
+ * Why `gh` with these arguments, and this stdin, is not one of the calls the release kit makes, or undefined when it is.
+ * An allowlist: the exact REST reads and writes, the one GraphQL mutation (compared whole), and the `gh run`, `gh
+ * attestation` and `gh release` forms the kit uses. Everything else is refused, approving or rejecting a deployment,
+ * environments, rulesets, their bypasses and branch protection included, in any spelling: the release approval is the
+ * owner's alone (CONTRIBUTING.md, "Releasing").
+ */
+export function forbiddenCall(args, input, { repository = process.env.GITHUB_REPOSITORY } = {}) {
+  if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return "arguments that are not strings"
+  const [command, sub] = args
+  // A call on a repository names exactly GITHUB_REPOSITORY; without a well-formed one, no such call is made.
+  const knownRepository = typeof repository === "string" && REPO_EXACT.test(repository)
+  const otherRepository = (name) => !knownRepository || name !== repository
+  if (command === "api") {
+    if (args.length === 4 && sub === "graphql" && args[2] === "--input" && args[3] === "-") return commitRequestProblem(input, repository)
+    const method = sub === "-X" ? args[2] : "GET"
+    const path = sub === "-X" ? args[3] : sub
+    if (!plainRepositoryPath(path, { rest: true })) return "a path with encoded, empty or relative parts"
+    if (!knownRepository) return "a call on a repository while GITHUB_REPOSITORY is unset or not owner/name"
+    if (otherRepository(path.split("/").slice(1, 3).join("/"))) return `a call on another repository than ${repository}`
+    const rest = args.slice(sub === "-X" ? 4 : 2)
+    if (method === "GET") return rest.length === 0 && READS.some((pattern) => pattern.test(path)) ? undefined : `GET ${path}, which the kit never reads`
+    if (method === "DELETE") return rest.length === 0 && exact(`repos/${REPO}/git/refs/heads/release/${TAG}`).test(path) ? undefined : `DELETE ${path}`
+    if (method !== "POST") return `${method} ${path}`
+    if (exact(`repos/${REPO}/git/refs`).test(path)) {
+      if (rest.length === 4 && rest[0] === "-f" && rest[2] === "-f" && exact(`ref=refs/heads/release/${TAG}`).test(rest[1]) && exact(`sha=${SHA}`).test(rest[3])) return undefined
+      const body = rest.length === 2 && rest[0] === "--input" && rest[1] === "-" ? bodyWith(input, ["ref", "sha"]) : undefined
+      return body && exact(`refs/tags/${TAG}`).test(String(body.ref)) && SHA_EXACT.test(String(body.sha)) ? undefined : "a ref other than release/<tag> at a commit or the release tag"
+    }
+    if (exact(`repos/${REPO}/git/tags`).test(path)) {
+      const body = rest.length === 2 && rest[0] === "--input" && rest[1] === "-" ? bodyWith(input, ["message", "object", "tag", "tagger", "type"]) : undefined
+      return body && TAG_EXACT.test(String(body.tag)) && body.message === body.tag && body.type === "commit" && SHA_EXACT.test(String(body.object)) ? undefined : "a tag object other than the release tag's"
+    }
+    return `POST ${path}`
+  }
+  if ((command === "run" || command === "attestation") && !knownRepository) return "a call on a repository while GITHUB_REPOSITORY is unset or not owner/name"
+  if ((command === "run" || command === "attestation") && args.includes("--repo") && otherRepository(args[args.indexOf("--repo") + 1])) return `a call on another repository than ${repository}`
+  if (command === "run" && sub === "download" && /^\d+$/.test(args[2] ?? "") && args[3] === "--repo" && REPO_EXACT.test(args[4] ?? "")) {
+    const rest = args.slice(5)
+    if (rest.length === 4 && rest[0] === "--name" && rest[1] === "native-manifest" && rest[2] === "--dir" && plainPath(rest[3])) return undefined
+    if (rest.length === 2 && rest[0] === "--dir" && plainPath(rest[1])) return undefined
+    return "a run download the kit does not make"
+  }
+  if (command === "attestation" && sub === "verify" && args.length === 5 && plainPath(args[2]) && args[3] === "--repo" && REPO_EXACT.test(args[4])) return undefined
+  if (command === "release" && TAG_EXACT.test(args[2] ?? "")) {
+    const [, , tag, ...rest] = args
+    if (sub === "view" && rest.length === 2 && rest[0] === "--json" && rest[1] === "assets,isDraft") return undefined
+    if (sub === "download" && rest.length === 4 && rest[0] === "--pattern" && plainPath(rest[1]) && rest[2] === "--dir" && plainPath(rest[3])) return undefined
+    if (sub === "upload" && rest.length > 0 && rest.every(plainPath)) return undefined
+    if (sub === "create" && rest[0] === "--verify-tag" && rest[1] === "--title" && rest[2] === tag && rest[3] === "--notes-file" && rest.length > 5 && rest.slice(4).every(plainPath)) return undefined
+    return `gh release ${sub} in a form the kit does not use`
+  }
+  return `gh ${[command, sub].filter(Boolean).join(" ")}, which the kit never runs`
+}
+
+/**
+ * Runs `gh`, only for a call the kit makes (forbiddenCall), and returns its output, or throws with its message. `input`
+ * is sent on stdin, re-serialised from the checked body, so gh sends exactly what was checked. With `inherit`, gh's
+ * output goes to this process's, and nothing is returned. `repository` (GITHUB_REPOSITORY by default) is the one
+ * repository every call may name.
+ */
+export function ghOutput(args, { input, inherit = false, repository = process.env.GITHUB_REPOSITORY } = {}) {
+  const forbidden = forbiddenCall(args, input, { repository })
+  if (forbidden) throw new Error(`refused: the release kit makes only its own GitHub calls, and not ${forbidden}; only the owner approves a release`)
+  const sent = input === undefined ? undefined : JSON.stringify(strictJson(input))
+  const result = spawnSync("gh", args, { encoding: "utf8", input: sent, maxBuffer: 256 * 1024 * 1024, stdio: inherit ? ["pipe", "inherit", "inherit"] : "pipe" })
   if (result.error) throw new Error(`gh could not run: ${result.error.message}`)
-  if (result.status !== 0) throw new Error(ghError(result.stderr, result.status))
-  return result.stdout
+  if (result.status !== 0) throw new Error(inherit ? `gh ${args.slice(0, 2).join(" ")} failed (exit ${result.status})` : ghError(result.stderr, result.status))
+  return inherit ? "" : result.stdout
 }
 
 /** gh's error text, one line: the line naming the HTTP status when there is one, else the first non-empty line. */

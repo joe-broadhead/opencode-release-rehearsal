@@ -46,9 +46,9 @@ function git(args, { allowFailure = false } = {}) {
   return result.status === 0 ? result.stdout.trim() : undefined
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { stdio: "inherit" })
-  if (result.status !== 0) die(`${command} ${args.join(" ")} failed (exit ${result.status})`)
+function npm(args) {
+  const result = spawnSync("npm", args, { stdio: "inherit" })
+  if (result.status !== 0) die(`npm ${args.join(" ")} failed (exit ${result.status})`)
 }
 
 function parseArgs(argv) {
@@ -97,8 +97,8 @@ function main() {
 
   // The build the release ships: the repository's `build` script, after a clean `npm ci` with lifecycle scripts off. The
   // release commit then drops `build` with the other lifecycle scripts, so the install builds nothing.
-  run("npm", ["ci", "--ignore-scripts"])
-  run("npm", ["run", "build"])
+  npm(["ci", "--ignore-scripts"])
+  npm(["run", "build"])
   if (git(["status", "--porcelain", "--untracked-files=all"])) die("the build changed tracked files; the release commit would not be the build")
 
   // dist/ is git-ignored on master, so the build's files are listed as ignored, untracked files.

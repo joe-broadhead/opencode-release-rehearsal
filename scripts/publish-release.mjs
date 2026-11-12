@@ -3,15 +3,16 @@
 // It never deletes or replaces an asset, and never refuses an asset it does not know: assets attached later (a backup of
 // speech files, for example) stay where they are, and are listed. A kit file already on the Release must have the same
 // sha256 as the local file; if one does not, nothing is uploaded. The kit's files are every file under the folder, the
-// native binaries in its native/ subfolder included; an asset's name is its file name.
+// native binaries in its native/ subfolder included; an asset's name is its file name. `gh` runs only through ghOutput
+// (scripts/release-rules.mjs), which allows only the kit's own calls.
 //
 //   node scripts/publish-release.mjs --tag <tag> --dir <folder: the kit's files, SHA256SUMS included> --notes <notes file>
-import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { ghOutput } from "./release-rules.mjs"
 
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex")
 
@@ -78,15 +79,6 @@ export function publish({ tag, dir, notes, gh }) {
   return { action: missing.length ? "uploaded" : "unchanged", uploaded: missing.map((file) => file.name), unknown }
 }
 
-/** The GitHub CLI, with its error text kept (a missing Release is recognised by it). */
-function realGh(args) {
-  try {
-    return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
-  } catch (error) {
-    throw new Error(String(error.stderr || error.message).trim())
-  }
-}
-
 function main(argv) {
   const value = (flag) => {
     const at = argv.indexOf(flag)
@@ -100,7 +92,7 @@ function main(argv) {
     process.exit(2)
   }
   try {
-    const result = publish({ tag, dir, notes, gh: realGh })
+    const result = publish({ tag, dir, notes, gh: (args) => ghOutput(args) })
     console.log(`release ${tag}: ${result.action}; uploaded now: ${result.uploaded.join(", ") || "none"}`)
     if (result.unknown.length) console.log(`left alone (not kit files): ${result.unknown.join(", ")}`)
   } catch (error) {
