@@ -130,5 +130,5 @@ Each release has its own tag, and a Git install does not update by itself. To mo
 Or add the plugin to `opencode.json` instead, with the same spec:
 
 ```json
-{ "plugins": [{ "package": "github:joe-broadhead/opencode-tavily#v0.0.0" }] }
+{ "plugins": [{ "package": "github:joe-broadhead/opencode-tavily#v0.0.1" }] }
 ```

@@ -11,7 +11,7 @@ Write the plugin as its package name, or as an object with `package` and `option
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "github:joe-broadhead/opencode-tavily#v0.0.0",
+      "package": "github:joe-broadhead/opencode-tavily#v0.0.1",
       "options": { "websearch": true, "executionTimeoutMs": 900000 }
     }
   ]
@@ -169,7 +169,7 @@ OpenCode's `websearch` tool uses one provider. OpenCode chooses it in this order
 While the plugin's `websearch` option is `true`, OpenCode does not use your stored choice. To use it again, set the option to `false`:
 
 ```jsonc
-{ "plugins": [{ "package": "github:joe-broadhead/opencode-tavily#v0.0.0", "options": { "websearch": false } }] }
+{ "plugins": [{ "package": "github:joe-broadhead/opencode-tavily#v0.0.1", "options": { "websearch": false } }] }
 ```
 
 OpenCode applies the `opencode.json` setting after plugins run, so the plugin cannot see it. When you set it, `/tavily-status` still shows "Web search: Tavily, unless opencode.json sets "websearch"", but your setting is used.
