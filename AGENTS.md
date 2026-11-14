@@ -53,7 +53,7 @@ This repository builds `@joe-broadhead/opencode-tavily`, an OpenCode plugin that
 
 ## Contracts
 
-Keep these stable: plugin id `tavily.web`, TUI id `tavily.web.tui`, MCP server name `tavily`, RPC id `tavily.web` with the method `status`, the tools RPC `tavily.web.tools` with `describe` and one method per known tool, each with its class, and skill ids `tavily` and `tavily-research`. Users' permission rules and saved approvals name the server's tools, and clients call the RPC by its id.
+Keep these stable: plugin id `rehearsal.kit`, TUI id `rehearsal.kit.tui`, MCP server name `tavily`, RPC id `rehearsal.kit` with the method `status`, the tools RPC `rehearsal.kit.tools` with `describe` and one method per known tool, each with its class, and skill ids `tavily` and `tavily-research`. Users' permission rules and saved approvals name the server's tools, and clients call the RPC by its id.
 
 ## Commits
 

@@ -83,7 +83,7 @@ function StatusDialog(props: {
   props.context.keymap.layer(() => ({
     mode: "modal",
     commands: [
-      { id: "tavily.web.tui.refresh", title: "Refresh Tavily status", group: "Tavily", bind: "r", run: () => props.refresh() },
+      { id: "rehearsal.kit.tui.refresh", title: "Refresh Tavily status", group: "Tavily", bind: "r", run: () => props.refresh() },
       { title: "Close Tavily status", group: "Tavily", bind: "escape", run: () => props.context.ui.dialog.clear() },
     ],
   }))
@@ -179,7 +179,7 @@ function StatusDialog(props: {
 const terminalHasKey = () => Boolean(globalThis.process?.env.TAVILY_API_KEY)
 
 const plugin: Plugin.Definition = {
-  id: "tavily.web.tui",
+  id: "rehearsal.kit.tui",
   setup(context) {
     const [view, setView] = createSignal<View>({ state: "loading" })
     const [refreshing, setRefreshing] = createSignal(false)
@@ -240,12 +240,12 @@ const plugin: Plugin.Definition = {
       mode: "global",
       commands: [
         {
-          id: "tavily.web.tui.status",
+          id: "rehearsal.kit.tui.status",
           title: "Tavily: Status",
           description: "Show Tavily's connection, sign-in, tools, web search default and next step",
           group: "Tavily",
           palette: true,
-          slash: { name: "tavily" },
+          slash: { name: "rehearsal" },
           run: show,
         },
       ],

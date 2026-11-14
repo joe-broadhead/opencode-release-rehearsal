@@ -28,8 +28,8 @@ function context(version: string, options: Record<string, unknown>) {
 }
 
 describe("plugin", () => {
-  test("keeps the id tavily.web", () => {
-    expect(plugin.id).toBe("tavily.web")
+  test("keeps the id rehearsal.kit", () => {
+    expect(plugin.id).toBe("rehearsal.kit")
   })
 
   test("an untested host is refused before anything is registered", async () => {

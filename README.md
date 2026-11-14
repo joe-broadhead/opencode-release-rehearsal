@@ -2,7 +2,8 @@
 > **TEST ONLY. Do not install this repository.** It is a scratch rehearsal of the release workflow of the OpenCode
 > plugin family (a release built and committed in GitHub Actions, tagged only after the owner's approval). Its code is
 > a copy of [opencode-tavily](https://github.com/joe-broadhead/opencode-tavily); use that plugin instead. This
-> repository will be deleted after the rehearsal.
+> repository is kept for release-kit rehearsals. It carries no Jelly declaration, and its plugin id is `rehearsal.kit`,
+> so neither Jelly's catalogue nor OpenCode takes it for Tavily.
 
 # Tavily for OpenCode
 
@@ -93,7 +94,7 @@ Tavily status
 A script or a cron job can call the five tools with no model, through `opencode api`. It runs as a session and its agent, under that agent's permission rules and the session's own, and spends credits as the tool does. The rule is resolved first, so only a prior explicit `allow` runs: an `ask` is refused, and a saved "Always allow" does not authorize an ad-hoc script:
 
 ```sh
-opencode api post /api/rpc/tavily.web.tools/tavily_search \
+opencode api post /api/rpc/rehearsal.kit.tools/tavily_search \
   -H "x-opencode-directory:$PWD" \
   -d '{"input":{"sessionID":"ses_…","input":{"query":"OpenCode plugin API"}}}'
 ```

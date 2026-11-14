@@ -139,7 +139,7 @@ describe(`defaults on ${HOST}`, () => {
 
   test("the plugin is active and registers the tavily server, /tavily-status and both skills", async () => {
     const { data: plugins } = await host.client.plugin.list({ location: host.location })
-    expect(plugins.find((entry) => entry.id === "tavily.web")?.state).toEqual({ status: "active" })
+    expect(plugins.find((entry) => entry.id === "rehearsal.kit")?.state).toEqual({ status: "active" })
     const server = await tavilyServer(host)
     expect(server?.status.status).toBe("needs_auth")
     expect(server?.integrationID).toBe(OAUTH_INTEGRATION_ID)

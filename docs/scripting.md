@@ -2,7 +2,7 @@
 
 Unofficial plugin. Not affiliated with Tavily.
 
-A script can call Tavily's tools with no model: a cron job, a shell script, or any program that can reach the OpenCode server. It uses the tools RPC, `tavily.web.tools`, through `opencode api` or an OpenCode client.
+A script can call Tavily's tools with no model: a cron job, a shell script, or any program that can reach the OpenCode server. It uses the tools RPC, `rehearsal.kit.tools`, through `opencode api` or an OpenCode client.
 
 | Method | The tool | Class |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ opencode api post /api/session -d '{"title":"news digest","agent":"build","locat
 The body is `{"input": {"sessionID": "<session>", "input": <the tool's input>}}`. Both keys are required, and no other key is allowed:
 
 ```sh
-opencode api post /api/rpc/tavily.web.tools/tavily_search -H "x-opencode-directory:$PWD" -d '{"input":{"sessionID":"ses_…","input":{"query":"OpenCode plugin API"}}}'
+opencode api post /api/rpc/rehearsal.kit.tools/tavily_search -H "x-opencode-directory:$PWD" -d '{"input":{"sessionID":"ses_…","input":{"query":"OpenCode plugin API"}}}'
 ```
 
 ## The location
@@ -68,8 +68,8 @@ A location unloads after OpenCode's idle timeout. If a scheduled script gets `rp
 The tool's input is Tavily's: `describe` shows each tool's schema as OpenCode lists it now.
 
 ```sh
-opencode api post /api/rpc/tavily.web.tools/describe -H "x-opencode-directory:$PWD" -d '{"input":{}}'
-opencode api post /api/rpc/tavily.web.tools/describe -H "x-opencode-directory:$PWD" -d '{"input":{"sessionID":"ses_…"}}'
+opencode api post /api/rpc/rehearsal.kit.tools/describe -H "x-opencode-directory:$PWD" -d '{"input":{}}'
+opencode api post /api/rpc/rehearsal.kit.tools/describe -H "x-opencode-directory:$PWD" -d '{"input":{"sessionID":"ses_…"}}'
 ```
 
 ## Results

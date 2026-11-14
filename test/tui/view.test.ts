@@ -72,7 +72,7 @@ async function open(options = { location: LOCATION as typeof LOCATION | undefine
   harnesses.push(fake)
   const cleanup = await plugin.setup(fake.context as unknown as Plugin.Context)
   if (!cleanup) throw new Error("setup returned no cleanup")
-  await fake.command("tavily.web.tui.status").run()
+  await fake.command("rehearsal.kit.tui.status").run()
   await fake.frame()
   return { ...fake, cleanup }
 }
@@ -82,13 +82,13 @@ afterEach(() => {
 })
 
 describe("Tavily TUI status view", () => {
-  test("registers the palette entry and the /tavily slash command", async () => {
+  test("registers the palette entry and the /rehearsal slash command", async () => {
     const fake = fakeContext()
     harnesses.push(fake)
-    expect(plugin.id).toBe("tavily.web.tui")
+    expect(plugin.id).toBe("rehearsal.kit.tui")
     await plugin.setup(fake.context as unknown as Plugin.Context)
-    const command = fake.command("tavily.web.tui.status")
-    expect(command).toMatchObject({ title: "Tavily: Status", palette: true, slash: { name: "tavily" } })
+    const command = fake.command("rehearsal.kit.tui.status")
+    expect(command).toMatchObject({ title: "Tavily: Status", palette: true, slash: { name: "rehearsal" } })
     expect(fake.dialog.open).toBeUndefined()
     expect(fake.calls).toHaveLength(0)
     // Nothing listens until the dialog opens.
@@ -105,7 +105,7 @@ describe("Tavily TUI status view", () => {
     expect(frame).toContain("r refresh · esc close")
     expect(frame).not.toContain("refreshing…")
     expect(view.calls).toHaveLength(1)
-    expect(view.calls[0]).toMatchObject({ rpcID: "tavily.web", input: {}, options: { location: LOCATION } })
+    expect(view.calls[0]).toMatchObject({ rpcID: "rehearsal.kit", input: {}, options: { location: LOCATION } })
     expect(view.calls[0].options.signal).toBeInstanceOf(AbortSignal)
   })
 
@@ -260,12 +260,12 @@ describe("Tavily TUI status view", () => {
     expect(view.calls[0].options.signal?.aborted).toBe(true)
     expect(view.hasCommand("r")).toBe(false)
     expect(view.hasCommand("escape")).toBe(false)
-    expect(view.hasCommand("tavily.web.tui.status")).toBe(true)
+    expect(view.hasCommand("rehearsal.kit.tui.status")).toBe(true)
   })
 
   test("opening it again while open keeps it live", async () => {
     const view = await open()
-    await view.command("tavily.web.tui.status").run()
+    await view.command("rehearsal.kit.tui.status").run()
     expect(view.calls[0].options.signal?.aborted).toBe(true)
     view.calls[1].resolve(connected)
     await settle()

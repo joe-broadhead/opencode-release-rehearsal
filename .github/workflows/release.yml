@@ -39,7 +39,7 @@ concurrency:
 
 env:
   # Set when the kit is copied into a plugin: the plugin's status RPC id and its skill id (the stock check reads them).
-  PLUGIN_RPC: tavily.web
+  PLUGIN_RPC: rehearsal.kit
   PLUGIN_SKILL: tavily
   PARENT: ${{ inputs.sha }}
 

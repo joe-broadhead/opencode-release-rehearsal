@@ -48,7 +48,7 @@ Search results, page text from Extract and Crawl, and Research reports come from
 
 ## Scripts
 
-The tools RPC (`tavily.web.tools`, see [docs/scripting.md](https://github.com/joe-broadhead/opencode-tavily/blob/HEAD/docs/scripting.md)) runs Tavily's five tools for a script, with no model. It adds no authority:
+The tools RPC (`rehearsal.kit.tools`, see [docs/scripting.md](https://github.com/joe-broadhead/opencode-tavily/blob/HEAD/docs/scripting.md)) runs Tavily's five tools for a script, with no model. It adds no authority:
 
 - A script names a session that names an agent, and runs as them. The rule for the tool's permission action is resolved before it runs, in OpenCode's own order (the agent's rules, then the session's, the last match winning). Only an `allow` runs; an `ask` and a `deny` are refused with no tool call.
 - **A script gets the same default as the model:** at `access: "all"` every known tool runs, so a script can spend credits on all five. Under `"ask-changes"` or `"read-only"`, or with a later rule, a call is refused. An ask is refused, not prompted: no one is there to answer it. A saved "Always allow" approval is not part of the agent's and the session's rules, so it does not authorize an ad-hoc script. The plugin's permission hook changes only an ask on one of its own script calls in flight, only to a deny, and leaves every other call alone.

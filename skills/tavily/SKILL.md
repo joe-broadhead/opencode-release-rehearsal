@@ -36,7 +36,7 @@ Stop as soon as you can answer.
 Read the status, which costs nothing, and never run a test search:
 
 ```sh
-opencode api post /api/rpc/tavily.web/status -d '{"input":{}}'
+opencode api post /api/rpc/rehearsal.kit/status -d '{"input":{}}'
 ```
 
 Report `state`, `auth`, `tools.visible` and any `unguardedAgents`, then quote `nextStep` whole: it is the one fix, and a paraphrase drops parts of it. Add no fixes of your own and don't search for config files; the next step already says where the change goes. The user can also run `/tavily-status`.
@@ -47,7 +47,7 @@ A script calls the tools RPC as a session and its agent, with no model and no ke
 
 ```sh
 opencode api post /api/session -d '{"title":"news digest","agent":"build","location":{"directory":"/path/to/project"}}'
-opencode api post /api/rpc/tavily.web.tools/tavily_search \
+opencode api post /api/rpc/rehearsal.kit.tools/tavily_search \
   -d '{"input":{"sessionID":"ses_…","input":{"query":"…","search_depth":"basic","max_results":3}}}'
 ```
 

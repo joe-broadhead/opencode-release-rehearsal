@@ -6,8 +6,8 @@ import { SERVER_NAME } from "../../src/mcp.js"
 import { KNOWN_ACTIONS } from "../../src/permissions.js"
 
 describe("Tavily's tools RPC", () => {
-  test("is tavily.web.tools, with exactly Tavily's five tools as methods", () => {
-    expect(TOOLS_RPC_ID).toBe("tavily.web.tools")
+  test("is rehearsal.kit.tools, with exactly Tavily's five tools as methods", () => {
+    expect(TOOLS_RPC_ID).toBe("rehearsal.kit.tools")
     expect(METHODS.map((method) => method.name)).toEqual(["tavily_search", "tavily_extract", "tavily_map", "tavily_crawl", "tavily_research"])
   })
 
