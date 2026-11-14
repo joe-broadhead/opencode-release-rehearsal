@@ -111,6 +111,19 @@ describe("check-drift: the declaration against the capture", () => {
     assert.deepEqual(failing(findings), ["effect-not-allow:demo.a"])
   })
 
+  test("a per-account pattern may share its default tool's permission and readOnly (Plaud's shape); no other duplicate may", () => {
+    const plaud = (name, permission, readOnly) => ({ name, permission, effect: "allow", readOnly })
+    const capture = { ...fixture([served("list_files", true), served("get_note", true), served("export", false)]), server: "plaud", namespace: "plaud" }
+    const shape = [plaud("plaud.list_files", "plaud_list_files", true), plaud("plaud.get_note", "plaud_get_note", true), plaud("plaud.export", "plaud_export", false), plaud("plaud-*.list_files", "plaud_list_files", true), plaud("plaud-*.get_note", "plaud_get_note", true)]
+    const plaudRun = (tools) => checkDrift({ pkg: { jelly: { tools } }, fixture: { ...capture, digest: toolsDigest(capture.tools) }, provenance: provenanceOf(capture) })
+    assert.deepEqual(failing(plaudRun(shape)), [])
+    const schema = (tools) => failing(plaudRun(tools)).filter((item) => item.startsWith("schema"))
+    assert.deepEqual(schema([...shape.slice(0, 3), plaud("plaud-*.list_files", "plaud_list_files", false)]), ["schema:plaud-*.list_files"], "a pattern with another readOnly")
+    assert.deepEqual(schema([...shape.slice(0, 3), plaud("plaud.list_files_again", "plaud_list_files", true)]), ["schema:plaud.list_files_again"], "a duplicate that is not a pattern")
+    assert.deepEqual(schema([...shape.slice(0, 3), plaud("plaud-*.get_note", "plaud_list_files", true)]), ["schema:plaud-*.get_note"], "a pattern whose suffix names another tool")
+    assert.deepEqual(schema([...shape, plaud("plaud-*.list_files", "plaud_list_files", true)]), ["schema:plaud-*.list_files"], "the same pattern twice")
+  })
+
   test("checks the schema: unknown tool keys, duplicates, and the 256-tool cap", () => {
     const many = Array.from({ length: 257 }, (_, index) => tool(`t${index}`))
     const pkg = { jelly: { tools: [...many, { ...tool("t0"), extra: 1 }] } }

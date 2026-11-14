@@ -313,14 +313,30 @@ export function checkDrift({ pkg, fixture, provenance, registry = {}, effectExce
 
   // schema
   if (declared.length > MAX_TOOLS) add("fail", "schema", { detail: `${declared.length} tools declared; Jelly takes at most ${MAX_TOOLS}` })
+  // A permission is declared once, except for a per-account pattern (Plaud's `plaud-*.list_files`): a name with `*` that
+  // ends `*.<tool>` may share its permission with the one default tool `<namespace>.<tool>`, with the same readOnly, as
+  // Jelly accepts. The pattern is then left out of the checks by permission below; its default tool stands for both.
   const byPermission = new Map()
   const names = new Set()
+  const patterns = []
   for (const tool of declared) {
     for (const key of Object.keys(tool)) if (!TOOL_KEYS.has(key)) add("fail", "schema", { tool: tool.name, detail: `unknown key ${key}: Jelly refuses an unknown key inside a tool` })
-    if (byPermission.has(tool.permission)) add("fail", "schema", { tool: tool.name, detail: `permission ${tool.permission} is declared twice` })
     if (names.has(tool.name)) add("fail", "schema", { tool: tool.name, detail: "declared twice" })
-    byPermission.set(tool.permission, tool)
     names.add(tool.name)
+    if (String(tool.name).includes("*")) patterns.push(tool)
+    else if (byPermission.has(tool.permission)) add("fail", "schema", { tool: tool.name, detail: `permission ${tool.permission} is declared twice` })
+    else byPermission.set(tool.permission, tool)
+  }
+  const toolPart = (name) => String(name).slice(String(name).indexOf(".") + 1)
+  for (const pattern of patterns) {
+    const twin = byPermission.get(pattern.permission)
+    if (!twin) {
+      byPermission.set(pattern.permission, pattern)
+      continue
+    }
+    const suffix = String(pattern.name).slice(String(pattern.name).lastIndexOf("*") + 1)
+    if (suffix !== `.${toolPart(twin.name)}` || toolPart(twin.name).includes("*")) add("fail", "schema", { tool: pattern.name, detail: `permission ${pattern.permission} is declared twice: a per-account pattern shares a permission only with the default tool of the same name (${twin.name})` })
+    else if ((pattern.readOnly ?? false) !== (twin.readOnly ?? false)) add("fail", "schema", { tool: pattern.name, detail: `permission ${pattern.permission} is declared twice, with readOnly ${pattern.readOnly ?? false} here and ${twin.readOnly ?? false} on ${twin.name}: a per-account pattern keeps its default tool's readOnly` })
   }
 
   // effects
