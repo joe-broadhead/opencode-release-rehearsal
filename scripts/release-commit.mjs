@@ -9,7 +9,7 @@
 //
 // The folder holds the files at their repository paths, and paths.txt: one `<sha256>  <path>` line per file, sorted, so
 // the commit job can tell that it received exactly what was built. Refuses: a dirty tree, a head other than --sha, a
-// version that is not x.y.z, a private package, package.json not in its canonical form, no build script, a native plugin
+// version that is not x.y.z, a package.json that is not private or not in its canonical form (packageProblems), no build script, a native plugin
 // (one with .github/workflows/native.yml) without --manifest or a plugin that is not native with one, a manifest that
 // does not name this tag and commit, a build that changes tracked files or builds no dist/, and a built path outside the
 // allowed set or that is not a regular file.
@@ -19,7 +19,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileS
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { MANIFEST_PATH, manifestProblems } from "./native-manifest.mjs"
-import { allowedPath, releasePackageText, serialise } from "./release-rules.mjs"
+import { allowedPath, packageProblems, releasePackageText } from "./release-rules.mjs"
 import { tagFor, versionProblem } from "./release-version.mjs"
 
 /** The workflow whose presence makes a plugin native. */
@@ -75,12 +75,13 @@ function main() {
   if (git(["rev-parse", "HEAD"]) !== options.sha) die(`the checkout is not ${options.sha.slice(0, 12)}`)
 
   const pkgPath = join(root, "package.json")
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"))
+  const pkgText = readFileSync(pkgPath, "utf8")
+  const packageRefusals = packageProblems(pkgText)
+  if (packageRefusals.length) die(packageRefusals.join("; "))
+  const pkg = JSON.parse(pkgText)
   const versionRefusal = versionProblem(pkg.version)
   if (versionRefusal) die(versionRefusal)
   const tag = tagFor(pkg.version)
-  if (pkg.private === true) die('package.json has "private": true')
-  if (serialise(pkg) !== readFileSync(pkgPath, "utf8")) die("package.json is not in the repository's canonical JSON form")
   if (!pkg.scripts?.build) die('package.json has no "build" script: the release builds with npm run build')
 
   const native = existsSync(join(root, NATIVE_WORKFLOW))

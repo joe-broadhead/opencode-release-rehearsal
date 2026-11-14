@@ -2,11 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.2] - 2026-11-14
 
 ### Changed
 
 - Rehearsal only: no `jelly` declaration (and no `docs/jelly.md`), so no catalogue scan takes this repository for a plugin to offer. The plugin id is `rehearsal.kit` (TUI `rehearsal.kit.tui`, RPC `rehearsal.kit`, tools RPC `rehearsal.kit.tools`), the slash command `/rehearsal`, and the keywords no longer say `opencode-plugin` or `tavily`. `check-icons` accepts a package with no `jelly` section.
+- Release kit revision `b8b230e`: `package.json` is `"private": true`, so npm can never publish the package, and the kit
+  requires it, with `package.json` in its canonical form, in `npm run check` and in the release planner.
 
 ## [0.0.1] - 2026-11-12
 

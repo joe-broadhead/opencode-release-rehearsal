@@ -1,6 +1,7 @@
 {
   "name": "@joe-broadhead/opencode-release-rehearsal",
-  "version": "0.0.1",
+  "version": "0.0.2",
+  "private": true,
   "description": "TEST ONLY: a rehearsal of the release kit, copied from opencode-tavily. Not a plugin to install: it has no Jelly declaration and its plugin id is rehearsal.kit.",
   "keywords": [
     "opencode",
