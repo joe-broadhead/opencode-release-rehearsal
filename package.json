@@ -1,11 +1,10 @@
 {
   "name": "@joe-broadhead/opencode-release-rehearsal",
   "version": "0.0.1",
-  "description": "TEST ONLY: a rehearsal of the release workflow, copied from opencode-tavily. Do not install.",
+  "description": "TEST ONLY: a rehearsal of the release kit, copied from opencode-tavily. Not a plugin to install: it has no Jelly declaration and its plugin id is rehearsal.kit.",
   "keywords": [
     "opencode",
-    "opencode-plugin",
-    "tavily"
+    "release-rehearsal"
   ],
   "license": "MIT",
   "repository": {
@@ -92,88 +91,6 @@
       "id": "tavily",
       "name": "Tavily",
       "domain": "tavily.com"
-    }
-  },
-  "jelly": {
-    "title": "Tavily",
-    "summary": "Web search, extract, crawl and research.",
-    "icon": "assets/icon.svg",
-    "tools": [
-      {
-        "name": "tavily.tavily_search",
-        "permission": "tavily_tavily_search",
-        "effect": "allow",
-        "readOnly": true
-      },
-      {
-        "name": "tavily.tavily_extract",
-        "permission": "tavily_tavily_extract",
-        "effect": "allow",
-        "readOnly": true
-      },
-      {
-        "name": "tavily.tavily_map",
-        "permission": "tavily_tavily_map",
-        "effect": "allow",
-        "readOnly": true
-      },
-      {
-        "name": "tavily.tavily_crawl",
-        "permission": "tavily_tavily_crawl",
-        "effect": "allow",
-        "readOnly": true
-      },
-      {
-        "name": "tavily.tavily_research",
-        "permission": "tavily_tavily_research",
-        "effect": "allow",
-        "readOnly": true
-      }
-    ],
-    "skills": [
-      "tavily",
-      "tavily-research"
-    ],
-    "rpc": [],
-    "views": [],
-    "signIns": [
-      {
-        "id": "key",
-        "label": "Tavily",
-        "integration": "tavily",
-        "group": "tavily",
-        "help": {
-          "url": "https://app.tavily.com/home",
-          "label": "Get a Tavily API key"
-        }
-      },
-      {
-        "id": "account",
-        "label": "Tavily account",
-        "server": "tavily",
-        "group": "tavily"
-      }
-    ],
-    "contributes": {
-      "homeFeeds": [],
-      "homeWidgets": [],
-      "workKinds": [],
-      "settings": [
-        {
-          "key": "access",
-          "label": "Access",
-          "type": "string",
-          "default": "all",
-          "description": "all, ask-changes or read-only. Generates default rules for agents with a base allow rule; the five known reads remain allowed."
-        },
-        {
-          "key": "websearch",
-          "label": "Web search",
-          "type": "boolean",
-          "default": true,
-          "description": "Make OpenCode's built-in Tavily provider the default for the websearch tool when no websearch setting is configured."
-        }
-      ]
     }
   }
 }

@@ -391,8 +391,11 @@ if (manifest) {
   const { jelly, opencode } = manifest
   const icons = opencode?.icons
 
-  // jelly.icon, unchanged.
-  if (!jelly || typeof jelly !== "object") bad('package.json: "jelly" is missing; it declares the mark Jelly draws.')
+  // jelly.icon, unchanged. The release rehearsal carries no jelly declaration (it is not offered to Jelly), so a
+  // missing "jelly" is allowed here; one that is present still declares the mark.
+  if (jelly === undefined) {
+    // No declaration: nothing for Jelly to draw.
+  } else if (!jelly || typeof jelly !== "object") bad('package.json: "jelly" is not an object.')
   else if (jelly.icon === undefined) bad(`package.json: "jelly.icon" is missing; it must be "${ICON_PATH}".`)
   else if (jelly.icon !== ICON_PATH) bad(`package.json: "jelly.icon" is "${jelly.icon}"; it must be "${ICON_PATH}".`)
 

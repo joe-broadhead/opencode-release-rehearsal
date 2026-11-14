@@ -80,8 +80,8 @@ describe("the scripting examples", () => {
   })
 
   test.each(examples)("$file:$line calls $method with this plugin's RPC id and a real method", (example) => {
-    expect(example.statement).toContain("/api/rpc/tavily.web.tools/")
-    expect(TOOLS_RPC_ID).toBe("tavily.web.tools")
+    expect(example.statement).toContain("/api/rpc/rehearsal.kit.tools/")
+    expect(TOOLS_RPC_ID).toBe("rehearsal.kit.tools")
     expect(example.method === "describe" || METHODS_BY_NAME.has(example.method)).toBe(true)
   })
 

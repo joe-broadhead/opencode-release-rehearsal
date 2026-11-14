@@ -38,7 +38,7 @@ import { KNOWN_ACTIONS } from "../permissions.js"
 import { tavilyErrorIn, tavilyErrorLine, type TavilyError } from "../tavily-error.js"
 
 /** The plugin's id. The RPC id is `<PLUGIN_ID>.tools`. */
-export const PLUGIN_ID = "tavily.web"
+export const PLUGIN_ID = "rehearsal.kit"
 
 /**
  * Every tool this plugin knows, by exact upstream name (the tool id without the `<server>_` prefix), with its class.

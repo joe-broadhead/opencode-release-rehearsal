@@ -73,15 +73,15 @@ The plugin reads it from `ctx.mcp.list()`, `ctx.tool.list()`, `ctx.agent.list()`
 
 `/tavily-status` posts the text as a synthetic message with `resume: false`, so no model turn starts.
 
-The RPC is `tavily.web`, with one read-only method, `status`. Its contract is `Tavily` in `src/rpc/index.ts`.
+The RPC is `rehearsal.kit`, with one read-only method, `status`. Its contract is `Tavily` in `src/rpc/index.ts`.
 
-- **Input:** `{}`. The input schema is an object with no properties and `additionalProperties: false`. A call with no input, or with any key, fails with OpenCode's `rpc.invalid_input` error (HTTP 400). From a client, call `client.rpc(Tavily).status({}, { location })`. Over HTTP, `POST /api/rpc/tavily.web/status` with the body `{"input":{}}`.
+- **Input:** `{}`. The input schema is an object with no properties and `additionalProperties: false`. A call with no input, or with any key, fails with OpenCode's `rpc.invalid_input` error (HTTP 400). From a client, call `client.rpc(Tavily).status({}, { location })`. Over HTTP, `POST /api/rpc/rehearsal.kit/status` with the body `{"input":{}}`.
 - **Output:** the status object, checked against its JSON Schema.
 - **Error:** `unavailable`, when the status cannot be read. Its message starts with `STATUS_UNAVAILABLE`, and its `data.nextStep` says what to do.
 
 ## Tools RPC
 
-`tavily.web.tools` lets a script call the five tools with no model; [Scripting](scripting.md) is the user's view. Its methods are `describe` and one per known read, named after the upstream tool. It is an allowlist: a tool that Tavily adds later, which asks on the model path, is never a method.
+`rehearsal.kit.tools` lets a script call the five tools with no model; [Scripting](scripting.md) is the user's view. Its methods are `describe` and one per known read, named after the upstream tool. It is an allowlist: a tool that Tavily adds later, which asks on the model path, is never a method.
 
 A call is `{ sessionID, input }`. The module:
 

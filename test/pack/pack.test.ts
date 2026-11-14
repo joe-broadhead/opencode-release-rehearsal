@@ -145,8 +145,8 @@ describe("the install", () => {
     }
     const server = await import(join(installed, "dist/index.js"))
     const tui = await import(join(installed, "dist/tui.js"))
-    expect(server.default.id).toBe("tavily.web")
-    expect(tui.default.id).toBe("tavily.web.tui")
+    expect(server.default.id).toBe("rehearsal.kit")
+    expect(tui.default.id).toBe("rehearsal.kit.tui")
   })
 })
 
@@ -166,7 +166,7 @@ for (const version of STOCK_VERSIONS)
 
     test("loads from its directory with its server and TUI parts", async () => {
       const { data: plugins } = await host.client.plugin.list({ location: host.location })
-      const entry = plugins.find((plugin) => plugin.id === "tavily.web")
+      const entry = plugins.find((plugin) => plugin.id === "rehearsal.kit")
       expect(entry?.state).toEqual({ status: "active" })
       expect(entry?.source).toEqual({ type: "local", path: expect.stringContaining(join("node_modules", NAME)) })
       // The host reports `rpc` only for a `./rpc` export, which it never loads; the server part registers the RPC.
@@ -182,7 +182,7 @@ for (const version of STOCK_VERSIONS)
       const packaged = skills.filter((skill) => skill.id.startsWith("tavily"))
       expect(packaged.map((skill) => skill.id).sort()).toEqual(["tavily", "tavily-research"])
       for (const skill of packaged) expect(skill.path).toContain(join("node_modules", NAME, "skills"))
-      const { output } = await host.client.rpc.call({ rpcID: "tavily.web", method: "status", input: {}, location: host.location })
+      const { output } = await host.client.rpc.call({ rpcID: "rehearsal.kit", method: "status", input: {}, location: host.location })
       expect(schemaErrors(Tavily.methods.status.output, output)).toEqual([])
       // The proxy refuses every request, so the server fails to connect (see startStock).
       expect(output).toMatchObject({ version: manifest.version, state: "failed", auth: "oauth", host: { version, range: ">=2.2.3 <2.3.0", tested: true }, unguardedAgents: [] })
@@ -226,7 +226,7 @@ function pointedAt(fake: FakeTavily, name: string) {
 }
 
 const rpcStatus = async (host: Host) =>
-  (await host.client.rpc.call({ rpcID: "tavily.web", method: "status", input: {}, location: host.location })).output as Record<string, unknown>
+  (await host.client.rpc.call({ rpcID: "rehearsal.kit", method: "status", input: {}, location: host.location })).output as Record<string, unknown>
 
 async function tavilyServer(host: Host) {
   const { data } = await host.client.mcp.list({ location: host.location })

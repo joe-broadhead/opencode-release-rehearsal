@@ -11,8 +11,8 @@ const valid = (schema: Parameters<typeof schemaErrors>[0], value: unknown) => sc
 const status = Tavily.methods.status
 
 describe("RPC contract", () => {
-  test("is tavily.web with one read-only method and no events", () => {
-    expect(Tavily.id).toBe("tavily.web")
+  test("is rehearsal.kit with one read-only method and no events", () => {
+    expect(Tavily.id).toBe("rehearsal.kit")
     expect(Object.keys(Tavily.methods)).toEqual(["status"])
     expect(Tavily.events).toEqual({})
   })

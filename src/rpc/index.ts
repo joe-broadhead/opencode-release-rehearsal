@@ -180,7 +180,7 @@ const status = {
 
 /** Call `status` with `{}` as the input. */
 export const Tavily = Rpc.define({
-  id: "tavily.web",
+  id: "rehearsal.kit",
   methods: {
     status: {
       input: { type: "object", properties: {}, additionalProperties: false },

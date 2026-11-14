@@ -15,7 +15,7 @@ import { selectWebsearchDefault, type WebsearchState } from "./websearch.js"
 const warn = (message: string) => console.warn(message)
 
 export default Plugin.define({
-  id: "tavily.web",
+  id: "rehearsal.kit",
   async setup(ctx) {
     // Options first: they hold the host check's override. Validation has no side effects.
     const options = parseOptions(ctx.options)
