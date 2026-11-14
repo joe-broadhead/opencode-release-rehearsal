@@ -16,7 +16,7 @@
 // GitHub's web-flow; the tag name is exactly v<version>, where the version is the x.y.z of the commit's package.json;
 // the commit has one parent, which is on the branch; the release moves forward from the last published GitHub Release
 // (an older version, whose parent is an ancestor of this one); package.json is exactly the parent's without its
-// lifecycle scripts and is not private; the paths it changes from its parent are exactly the allowed set, each a regular
+// lifecycle scripts and is private (npm never publishes it; a GitHub install does not read it); the paths it changes from its parent are exactly the allowed set, each a regular
 // file (mode 100644, no symlink or executable); dist/ is committed; a native plugin's manifest and run are right.
 //
 // The signature and the identities prove only that GitHub made the commit through its API for the workflow: anyone with
@@ -242,12 +242,12 @@ function main() {
     }
   }
 
-  // The package: no lifecycle scripts, and not private.
+  // The package: no lifecycle scripts, and private, so npm never publishes it.
   const lifecycle = Object.keys(pkg.scripts ?? {}).filter((name) => LIFECYCLE_SCRIPTS.includes(name))
   if (!lifecycle.length) ok("package.json has no lifecycle scripts")
   else fail("package.json", `lifecycle scripts remain: ${lifecycle.join(", ")}`)
-  if (pkg.private !== true) ok("the package is not private")
-  else fail("the package", 'package.json has "private": true')
+  if (pkg.private === true) ok('the package is private ("private": true)')
+  else fail("the package", 'package.json has no "private": true')
 
   if (options.notes) writeNotes(target, pkg.version, options.notes, (message) => fail("the release notes", message), ok)
 

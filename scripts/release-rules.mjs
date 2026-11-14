@@ -69,6 +69,26 @@ export const serialise = (pkg) => `${JSON.stringify(pkg, null, 2)}\n`
 export const releasePackageText = (pkg) => serialise(withoutLifecycle(pkg).next)
 
 /**
+ * Why a package.json text is not the one the kit releases, as sentences: it must parse to an object, be in the canonical
+ * form (`serialise`: JSON.stringify(pkg, null, 2) and a newline), and say `"private": true`, so npm can never publish
+ * it by accident. A GitHub install (`opencode plugin add github:...#v<version>`) does not read `private`, and `npm pack`
+ * still packs the release tarball. `npm run check` runs this on every repository's own package.json (the kit tests).
+ */
+export function packageProblems(text) {
+  let pkg
+  try {
+    pkg = JSON.parse(text)
+  } catch {
+    return ["package.json does not parse as JSON"]
+  }
+  if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return ["package.json is not a JSON object"]
+  const problems = []
+  if (serialise(pkg) !== text) problems.push("package.json is not in the canonical form: rewrite it as JSON.stringify(pkg, null, 2) followed by one newline (two-space indent, every array and object expanded, no trailing spaces)")
+  if (pkg.private !== true) problems.push('package.json has no "private": true: add it, so npm can never publish the package (a GitHub install does not read it)')
+  return problems
+}
+
+/**
  * Why a release commit, as the REST API returns it (GET repos/{r}/commits/{sha}), is not one the release workflow made:
  * GitHub verifies its signature, its author is github-actions[bot], its committer is GitHub's web-flow, and it has one
  * parent. Sentences; an address that is not one of the two fixed public ones is never printed.

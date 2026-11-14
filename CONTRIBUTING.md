@@ -62,11 +62,16 @@ a `## [x.y.z] - YYYY-MM-DD` heading below it, newest first, and the npm history 
    only their own GitHub calls and refuse every other.
 5. Check the published Release: not a draft, its notes, and every asset against `SHA256SUMS`.
 
+`package.json` stays `"private": true`, so npm can never publish the plugin by accident; a GitHub install does not read
+it, and `npm pack` still packs the release tarball. It is kept in its canonical form, `JSON.stringify(pkg, null, 2)` and
+one newline: the kit tests check both in `npm run check`, as the release planner does.
+
 Before the approval, the workflow:
-- **plans:** refuses a run that is not on `master`, a sha that is not `master`'s head, a sha without a successful `ci.yml`
-  push run, a version that is not `x.y.z`, a CHANGELOG whose newest release is not this version, a release that does not
-  move forward from the last published Release, a leftover `release/v<version>` branch, a native run that did not build
-  this sha on `master`, by hand, with success, and a missing `native_run` (or one given to a plugin that is not native);
+- **plans:** refuses a run that is not on `master`, a sha that is not `master`'s head, a sha without a successful
+  `ci.yml` push run, a version that is not `x.y.z`, a `package.json` that is not `"private": true` or not in its
+  canonical form, a CHANGELOG whose newest release is not this version, a release that does not move forward from the
+  last published Release, a leftover `release/v<version>` branch, a native run that did not build this sha on `master`,
+  by hand, with success, and a missing `native_run` (or one given to a plugin that is not native);
 - **builds** `dist/` with `npm ci --ignore-scripts` and `npm run build`, with a read-only token, and writes the release
   files: `dist/`, `package.json` without its lifecycle scripts, and the vetted native manifest;
 - **commits** them on a temporary branch `release/v<version>` at the parent, through GitHub's API with the workflow's token,

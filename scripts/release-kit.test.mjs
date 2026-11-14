@@ -26,6 +26,7 @@ import {
   forbiddenCall,
   ghOutput,
   modeProblems,
+  packageProblems,
   strictJson,
   releasedTags,
   releasePackageText,
@@ -36,6 +37,12 @@ import {
 } from "./release-rules.mjs"
 import { namesTarball, readsTarball } from "./release-pack.mjs"
 import { RELEASE_VERSION, tagFor, tagProblem, versionProblem } from "./release-version.mjs"
+
+// Under `git rebase --exec`, a hook or a git alias, git exports GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and friends. A git
+// command these tests run, or a kit script they start, would then read and write that repository (once the shared
+// .git/config of a worktree) instead of its scratch folder. Every GIT_ variable is cleared before anything runs; the
+// last test proves it with a decoy repository.
+for (const key of Object.keys(process.env)) if (key.startsWith("GIT_")) delete process.env[key]
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url))
 const scratch = mkdtempSync(join(tmpdir(), "release-kit-test-"))
@@ -449,6 +456,8 @@ describe("the calls the kit makes, and no other", () => {
   const TAG_BODY = JSON.stringify({ tag: "v0.0.1", message: "v0.0.1", object: SHA, type: "commit", tagger: { name: ACTIONS_BOT.name, email: ACTIONS_BOT.email, date: "2026-11-12T00:00:00Z" } })
   const REF_BODY = JSON.stringify({ ref: "refs/tags/v0.0.1", sha: SHA })
   const R = { repository: "o/r" }
+  // Absolute local paths, as the workflow passes them ($RUNNER_TEMP/...), built at run time: no machine path is written here.
+  const local = (name) => join(tmpdir(), name)
   const HEADLINE = "chore(release): v0.0.1 with the built dist/ and no lifecycle scripts"
   const commitInput = (change = {}) => ({
     branch: { repositoryNameWithOwner: "o/r", branchName: "release/v0.0.1" },
@@ -552,15 +561,15 @@ describe("the calls the kit makes, and no other", () => {
     assert.equal(forbiddenCall(["api", "graphql", "--input", "-"], COMMIT_BODY, R), undefined)
     assert.match(forbiddenCall(["api", "graphql", "--input", "-"], COMMIT_BODY, { repository: "" }), /another repository than GITHUB_REPOSITORY/)
     assert.match(forbiddenCall(["api", `repos/o/other/commits/${SHA}`], undefined, R), /another repository than o\/r/)
-    assert.match(forbiddenCall(["run", "download", "1", "--repo", "o/other", "--dir", "/tmp/x"], undefined, R), /another repository than o\/r/)
+    assert.match(forbiddenCall(["run", "download", "1", "--repo", "o/other", "--dir", local("x")], undefined, R), /another repository than o\/r/)
     assert.match(forbiddenCall(["api", "graphql", "--input", "-"], commitBody({ fileChanges: { additions: [{ path: "dist/../package.json", contents: "e30=" }] } }), R), /an empty, relative, absolute or control part/)
   })
 
   test("a call on a repository is refused while GITHUB_REPOSITORY is unset or not owner/name", () => {
     for (const repository of ["", "o", "o/r/x", "o/r ", "../r", 7]) {
       assert.match(forbiddenCall(["api", `repos/o/r/commits/${SHA}`], undefined, { repository }), /GITHUB_REPOSITORY is unset or not owner\/name|another repository/, String(repository))
-      assert.ok(forbiddenCall(["run", "download", "1", "--repo", "o/r", "--dir", "/tmp/x"], undefined, { repository }), String(repository))
-      assert.ok(forbiddenCall(["attestation", "verify", "/tmp/a.gz", "--repo", "o/r"], undefined, { repository }), String(repository))
+      assert.ok(forbiddenCall(["run", "download", "1", "--repo", "o/r", "--dir", local("x")], undefined, { repository }), String(repository))
+      assert.ok(forbiddenCall(["attestation", "verify", local("a.gz"), "--repo", "o/r"], undefined, { repository }), String(repository))
     }
     assert.match(forbiddenCall(["api", `repos/o/r/commits/${SHA}`], undefined, { repository: "" }), /GITHUB_REPOSITORY is unset or not owner\/name/)
     assert.equal(forbiddenCall(["api", `repos/o/r/commits/${SHA}`], undefined, R), undefined)
@@ -606,18 +615,18 @@ describe("the calls the kit makes, and no other", () => {
       [["api", `repos/o/r/commits/${SHA}`]],
       [["api", "repos/o/r/releases?per_page=100&page=2"]],
       [["api", `repos/o/r/compare/${SHA}...master`]],
-      [["run", "download", "1", "--repo", "o/r", "--name", "native-manifest", "--dir", "/tmp/x"]],
-      [["run", "download", "1", "--repo", "o/r", "--dir", "/tmp/x"]],
-      [["attestation", "verify", "/tmp/x/a.gz", "--repo", "o/r"]],
+      [["run", "download", "1", "--repo", "o/r", "--name", "native-manifest", "--dir", local("x")]],
+      [["run", "download", "1", "--repo", "o/r", "--dir", local("x")]],
+      [["attestation", "verify", local("x/a.gz"), "--repo", "o/r"]],
       [["api", "-X", "POST", "repos/o/r/git/refs", "-f", "ref=refs/heads/release/v0.0.1", "-f", `sha=${SHA}`]],
       [["api", "-X", "POST", "repos/o/r/git/refs", "--input", "-"], REF_BODY],
       [["api", "-X", "POST", "repos/o/r/git/tags", "--input", "-"], TAG_BODY],
       [["api", "-X", "DELETE", "repos/o/r/git/refs/heads/release/v0.0.1"]],
       [["api", "graphql", "--input", "-"], COMMIT_BODY],
       [["release", "view", "v0.0.1", "--json", "assets,isDraft"]],
-      [["release", "create", "v0.0.1", "--verify-tag", "--title", "v0.0.1", "--notes-file", "/tmp/notes.md", "/tmp/a.tgz", "/tmp/SHA256SUMS"]],
-      [["release", "download", "v0.0.1", "--pattern", "SHA256SUMS", "--dir", "/tmp/x"]],
-      [["release", "upload", "v0.0.1", "/tmp/a.tgz"]],
+      [["release", "create", "v0.0.1", "--verify-tag", "--title", "v0.0.1", "--notes-file", local("notes.md"), local("a.tgz"), local("SHA256SUMS")]],
+      [["release", "download", "v0.0.1", "--pattern", "SHA256SUMS", "--dir", local("x")]],
+      [["release", "upload", "v0.0.1", local("a.tgz")]],
     ]
     for (const [args, input] of allowed) assert.equal(forbiddenCall(args, input, R), undefined, args.join(" "))
   })
@@ -639,7 +648,7 @@ describe("the calls the kit makes, and no other", () => {
 
 describe("check-release-shape.mjs: the tag is v<package.json version>", () => {
   test("refuses a tag that is not v<package.json version>, and accepts the one that is", () => {
-    const repo = repository({ "package.json": serialise({ name: "kit-test", version: "0.0.1" }), "CHANGELOG.md": TWO })
+    const repo = repository({ "package.json": serialise({ name: "kit-test", version: "0.0.1", private: true }), "CHANGELOG.md": TWO })
     repo.git("tag", "-a", "v0.0.2", "-m", "v0.0.2")
     repo.git("tag", "-a", "v0.0.1", "-m", "v0.0.1")
     const wrong = shapeOf(repo, "v0.0.2")
@@ -651,7 +660,7 @@ describe("check-release-shape.mjs: the tag is v<package.json version>", () => {
 })
 
 describe("check-release-shape.mjs: the tag and the commit, as GitHub has them", () => {
-  const SOURCE = { name: "kit-test", version: "0.0.1", scripts: { build: "node build.mjs" } }
+  const SOURCE = { name: "kit-test", version: "0.0.1", private: true, scripts: { build: "node build.mjs" } }
   const tagged = () => {
     const repo = repository({ "package.json": serialise(SOURCE), "CHANGELOG.md": TWO })
     const commit = releaseOn(repo, { tag: "v0.0.1", pkgText: releasePackageText(SOURCE) })
@@ -720,7 +729,7 @@ describe("check-release-shape.mjs: the tag and the commit, as GitHub has them", 
 })
 
 describe("check-release-shape.mjs: package.json is exactly the parent's without its lifecycle scripts", () => {
-  const SOURCE = { name: "kit-test", version: "0.0.1", main: "dist/index.js", scripts: { build: "node build.mjs", test: "node --test" } }
+  const SOURCE = { name: "kit-test", version: "0.0.1", private: true, main: "dist/index.js", scripts: { build: "node build.mjs", test: "node --test" } }
   const RELEASED = JSON.parse(releasePackageText(SOURCE))
   const caseOf = (pkgText, tag = "v0.0.1") => {
     const repo = repository({ "package.json": serialise(SOURCE), "CHANGELOG.md": TWO })
@@ -752,7 +761,7 @@ describe("check-release-shape.mjs: package.json is exactly the parent's without 
 })
 
 describe("check-release-shape.mjs: regular files only, and no package.json in dist/", () => {
-  const SOURCE = { name: "kit-test", version: "0.0.1", scripts: { build: "node build.mjs" } }
+  const SOURCE = { name: "kit-test", version: "0.0.1", private: true, scripts: { build: "node build.mjs" } }
   const caseOf = (tweak) => {
     const repo = repository({ "package.json": serialise(SOURCE), "CHANGELOG.md": TWO })
     releaseOn(repo, { tag: "v0.0.1", pkgText: releasePackageText(SOURCE), tweak })
@@ -804,9 +813,9 @@ describe("check-release-shape.mjs: regular files only, and no package.json in di
 })
 
 describe("check-release-shape.mjs: releases move forward from the last published Release", () => {
-  const PKG = (version) => releasePackageText({ name: "kit-test", version })
+  const PKG = (version) => releasePackageText({ name: "kit-test", version, private: true })
   const twoCommits = () => {
-    const repo = repository({ "package.json": serialise({ name: "kit-test", version: "0.0.0" }), "CHANGELOG.md": ONE })
+    const repo = repository({ "package.json": serialise({ name: "kit-test", version: "0.0.0", private: true }), "CHANGELOG.md": ONE })
     return { repo, first: repo.head, second: laterCommit(repo) }
   }
 
@@ -879,11 +888,11 @@ describe("check-release-shape.mjs: releases move forward from the last published
 
 /** A plugin's source, as the release workflow sees it: a build, TESTED_HOSTS, and, when native, native.yml. */
 const pluginSource = (version, { native = false, changelog = TWO } = {}) => ({
-  "package.json": serialise({ name: "@owner/kit-test", version, scripts: { build: "node build.mjs", test: "node --test" } }),
+  "package.json": serialise({ name: "@owner/kit-test", version, private: true, scripts: { build: "node build.mjs", test: "node --test" } }),
   "CHANGELOG.md": changelog,
   ".gitignore": "dist/\nnode_modules/\n",
   "build.mjs": 'import { mkdirSync, writeFileSync } from "node:fs"\nmkdirSync("dist", { recursive: true })\nwriteFileSync("dist/index.js", "export default 1\\n")\nwriteFileSync("dist/tui.js", "export default 2\\n")\n',
-  "src/host.ts": 'export const TESTED_HOSTS = ["2.2.3", "2.2.6"] as const\n',
+  "src/host.ts": 'export const TESTED_HOSTS = ["9.8.1", "9.8.4"] as const\n',
   ...(native ? { ".github/workflows/native.yml": "name: native\n" } : {}),
 })
 
@@ -1008,7 +1017,7 @@ describe("release-github.mjs plan", () => {
 
   test("plans a new release: the version, the tag, the hosts, the CI run", () => {
     const { run } = setup()
-    assert.deepEqual(run(), { version: "0.0.1", tag: "v0.0.1", hosts: '["2.2.3","2.2.6"]', native: "false", mode: "new", commit: "", ci_run: "501", previous: "", manifest_sha256: "" })
+    assert.deepEqual(run(), { version: "0.0.1", tag: "v0.0.1", hosts: '["9.8.1","9.8.4"]', native: "false", mode: "new", commit: "", ci_run: "501", previous: "", manifest_sha256: "" })
   })
 
   test("refuses a run that is not on master, or a sha that is not the run's", () => {
@@ -1226,7 +1235,7 @@ describe("release-github.mjs commit", () => {
       "a symlink": [(dir) => symlinkSync("index.js", join(dir, "dist", "link.js")), /dist\/link\.js is not a regular file/],
       "a changed file": [(dir) => writeFileSync(join(dir, "dist", "index.js"), "changed\n"), /dist\/index\.js does not match its sha256 in paths\.txt/, false],
       "a missing file": [(dir) => rmSync(join(dir, "dist", "tui.js")), /missing dist\/tui\.js/, false],
-      "another package.json": [(dir) => writeFileSync(join(dir, "package.json"), serialise({ name: "@owner/kit-test", version: "0.0.1", scripts: { build: "x" } })), /package\.json is not exactly the parent's without its lifecycle scripts/],
+      "another package.json": [(dir) => writeFileSync(join(dir, "package.json"), serialise({ name: "@owner/kit-test", version: "0.0.1", private: true, scripts: { build: "x" } })), /package\.json is not exactly the parent's without its lifecycle scripts/],
     }
     for (const [label, [change, expected, relist = true]] of Object.entries(cases)) {
       const { files, github, run } = setup()
@@ -1503,6 +1512,22 @@ describe("release-github.mjs native: the staged native files against the release
     assert.deepEqual(nativeAssetProblems({ dir: staged({}), manifest: undefined }), [])
   })
 
+  test("checks every module of the manifest, not only the first", () => {
+    const WEATHER = Buffer.from("the weather-signal executable\n")
+    const WEATHER_GZ = gzipSync(WEATHER)
+    const twoModules = (weatherGz = WEATHER_GZ) => {
+      const manifest = manifestFor()
+      manifest.modules["weather-signal"] = { "linux-x64-gnu": { name: "weather-signal-linux-x64-gnu.gz", bytes: weatherGz.length, sha256: hash(weatherGz), executable: { name: "weather-signal", bytes: WEATHER.length, sha256: hash(WEATHER) } } }
+      return manifest
+    }
+    const files = (weatherGz) => ({ "gws-linux-x64-gnu.gz": GZ, "weather-signal-linux-x64-gnu.gz": weatherGz, "LICENSE-gws.txt": LICENCE })
+    assert.deepEqual(nativeAssetProblems({ dir: staged(files(WEATHER_GZ)), manifest: twoModules() }), [])
+    assert.deepEqual(nativeAssetProblems({ dir: staged(files(gzipSync(Buffer.from("x")))), manifest: twoModules() }).map((problem) => problem.split(":")[0]), ["weather-signal linux-x64-gnu"])
+    const swapped = gzipSync(Buffer.from("another weather-signal\n"))
+    assert.match(nativeAssetProblems({ dir: staged(files(swapped)), manifest: twoModules(swapped) }).join("; "), /^weather-signal linux-x64-gnu: weather-signal-linux-x64-gnu\.gz does not hold the executable the manifest pins/)
+    assert.deepEqual(nativeAssetProblems({ dir: staged({ "gws-linux-x64-gnu.gz": GZ, "LICENSE-gws.txt": LICENCE }), manifest: twoModules() }), ["weather-signal linux-x64-gnu: native/weather-signal-linux-x64-gnu.gz is not staged"])
+  })
+
   test("refuses a swapped gzip, and a swapped executable inside a gzip that looks valid", () => {
     const evil = gzipSync(Buffer.from("another executable\n"))
     assert.match(nativeAssetProblems({ dir: staged({ "gws-linux-x64-gnu.gz": evil, "LICENSE-gws.txt": LICENCE }), manifest: manifestFor() }).join("; "), /gws linux-x64-gnu: gws-linux-x64-gnu\.gz is not the file the manifest pins/)
@@ -1721,17 +1746,96 @@ describe("publish-release.mjs", () => {
   })
 })
 
+describe("package.json: private, and in the canonical form", () => {
+  const NOT_PRIVATE = { name: "@owner/kit-test", version: "0.0.1", scripts: { build: "node build.mjs", test: "node --test" } }
+
+  test("packageProblems accepts a private, canonical package.json, and names each problem otherwise", () => {
+    assert.deepEqual(packageProblems(serialise({ name: "x", version: "0.0.1", private: true })), [])
+    assert.deepEqual(packageProblems(serialise({ name: "x", version: "0.0.1" })), ['package.json has no "private": true: add it, so npm can never publish the package (a GitHub install does not read it)'])
+    assert.match(packageProblems(serialise({ name: "x", private: "true" })).join(), /has no "private": true/)
+    assert.match(packageProblems(serialise({ name: "x", private: false })).join(), /has no "private": true/)
+    for (const text of [`${JSON.stringify({ name: "x", private: true }, null, 2)}`, `${JSON.stringify({ name: "x", private: true }, null, "\t")}\n`, `${JSON.stringify({ name: "x", private: true })}\n`, `{\n  "name": "x",\n  "private": true,\n  "files": ["dist"]\n}\n`]) {
+      assert.deepEqual(packageProblems(text).map((problem) => problem.split(":")[0]), ["package.json is not in the canonical form"], JSON.stringify(text))
+    }
+    assert.deepEqual(packageProblems("{"), ["package.json does not parse as JSON"])
+    assert.deepEqual(packageProblems("[]\n"), ["package.json is not a JSON object"])
+  })
+
+  test("this repository's own package.json is private and canonical (npm run check)", () => {
+    assert.deepEqual(packageProblems(readFileSync(join(SCRIPTS, "..", "package.json"), "utf8")), [])
+  })
+
+  test("the release planner and the build refuse a package that is not private, before anything is built", () => {
+    const repo = repository({ ...pluginSource("0.0.1"), "package.json": serialise(NOT_PRIVATE) })
+    const github = fakeGitHub(repo)
+    github.state.ciRuns = [ciRun(repo.head)]
+    assert.throws(() => plan({ sha: repo.head, env: ENV(repo), gh: github.gh, cwd: repo.dir }), /package\.json has no "private": true/)
+    assert.deepEqual(github.calls, [], "the planner read nothing from GitHub")
+    const built = repo.node("release-commit.mjs", ["--sha", repo.head, "--out", join(folder(), "files")])
+    assert.equal(built.status, 1)
+    assert.match(built.stderr, /release-commit: package\.json has no "private": true/)
+    const tabbed = repository({ ...pluginSource("0.0.1"), "package.json": `${JSON.stringify({ ...NOT_PRIVATE, private: true }, null, "\t")}\n` })
+    assert.match(tabbed.node("release-commit.mjs", ["--sha", tabbed.head, "--out", join(folder(), "files")]).stderr, /package\.json is not in the canonical form/)
+  })
+
+  test("the release commit keeps \"private\": true, and the shape check requires it", () => {
+    const files = join(folder(), "files")
+    const repo = repository(pluginSource("0.0.1"))
+    assert.equal(repo.node("release-commit.mjs", ["--sha", repo.head, "--out", files]).status, 0)
+    assert.equal(JSON.parse(readFileSync(join(files, "package.json"), "utf8")).private, true)
+    const plain = repository({ "package.json": serialise(NOT_PRIVATE), "CHANGELOG.md": TWO })
+    releaseOn(plain, { tag: "v0.0.1", pkgText: releasePackageText(NOT_PRIVATE) })
+    const out = shapeOf(plain, "v0.0.1")
+    assert.match(out, /ok {3}package\.json is the parent's without its lifecycle scripts/)
+    assert.match(out, /FAIL the package: package\.json has no "private": true/)
+    const privateRepo = repository({ "package.json": serialise({ ...NOT_PRIVATE, private: true }), "CHANGELOG.md": TWO })
+    releaseOn(privateRepo, { tag: "v0.0.1", pkgText: releasePackageText({ ...NOT_PRIVATE, private: true }) })
+    assert.match(shapeOf(privateRepo, "v0.0.1"), /ok {3}the package is private \("private": true\)/)
+  })
+
+  test("npm pack packs a private package, and the tarball keeps \"private\": true", () => {
+    const dir = folder()
+    writeTree(dir, { "package.json": serialise({ name: "@owner/kit-test", version: "0.0.1", private: true, files: ["dist"] }), "dist/index.js": "export default 1\n" })
+    mkdirSync(join(dir, "out"))
+    const packed = spawnSync("npm", ["pack", "--ignore-scripts", "--pack-destination", join(dir, "out")], { cwd: dir, encoding: "utf8", env: { ...process.env, npm_config_update_notifier: "false" } })
+    assert.equal(packed.status, 0, packed.stderr)
+    assert.deepEqual(readdirSync(join(dir, "out")), ["owner-kit-test-0.0.1.tgz"])
+    const inside = spawnSync("tar", ["-xzOf", join(dir, "out", "owner-kit-test-0.0.1.tgz"), "package/package.json"], { encoding: "utf8" })
+    assert.equal(JSON.parse(inside.stdout).private, true)
+  })
+})
+
 // CI sets GITHUB_REPOSITORY to the plugin's own repository, and a shell may set it to anything. The kit tests pass the
 // repository they mean explicitly, so they must pass whatever the ambient value is: this runs them again, at once, with it
 // unset, set to the o/r the rule tests name, and set to another repository.
-describe("the kit tests, whatever the ambient GITHUB_REPOSITORY", { skip: process.env.KIT_TESTS_NESTED === "1" }, () => {
-  test("pass with GITHUB_REPOSITORY unset, set to the tests' own o/r, and set to another repository", async () => {
-    // Unset; the value the rule tests name, where an ambient value can stand in for a missing argument; and another.
+describe("the kit tests, whatever the ambient GITHUB_REPOSITORY and GIT_ variables", { skip: process.env.KIT_TESTS_NESTED === "1" }, () => {
+  test("pass with GITHUB_REPOSITORY unset, o/r or another, and never touch the repository GIT_DIR names", async () => {
+    // A decoy repository that git would use if the tests inherited GIT_DIR and friends (as under `git rebase --exec`).
+    const decoy = folder()
+    const decoyGit = (...args) => spawnSync("git", args, { cwd: decoy, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } })
+    decoyGit("init", "-q", "-b", "master")
+    decoyGit("-c", "user.name=decoy", "-c", "user.email=decoy@example.invalid", "commit", "-q", "--allow-empty", "-m", "decoy")
+    const digestOf = (dir) => {
+      const hash = createHash("sha256")
+      const walk = (at) => {
+        for (const name of readdirSync(at).sort()) {
+          const full = join(at, name)
+          if (lstatSync(full).isDirectory()) walk(full)
+          else hash.update(`${full}\0`).update(readFileSync(full))
+        }
+      }
+      walk(dir)
+      return hash.digest("hex")
+    }
+    const before = digestOf(join(decoy, ".git"))
+    const GIT_ENV = { GIT_DIR: join(decoy, ".git"), GIT_WORK_TREE: decoy, GIT_INDEX_FILE: join(decoy, ".git", "index"), GIT_COMMON_DIR: join(decoy, ".git") }
+    // Unset; the value the rule tests name, where an ambient value can stand in for a missing argument; and another,
+    // which also inherits the decoy's GIT_ variables.
     const runs = [undefined, "o/r", "someone-else/another-plugin"].map(
       (value) =>
         new Promise((resolve) => {
           // Each run has its own temporary folder: two tests count what is left in theirs.
-          const env = { ...process.env, KIT_TESTS_NESTED: "1", TMPDIR: folder() }
+          const env = { ...process.env, KIT_TESTS_NESTED: "1", TMPDIR: folder(), ...(value === "someone-else/another-plugin" ? GIT_ENV : {}) }
           // A run inside node --test reports to its parent through NODE_TEST_CONTEXT; this one is a run of its own.
           delete env.NODE_TEST_CONTEXT
           if (value === undefined) delete env.GITHUB_REPOSITORY
@@ -1751,5 +1855,6 @@ describe("the kit tests, whatever the ambient GITHUB_REPOSITORY", { skip: proces
       assert.equal(counts?.[2], "0", `GITHUB_REPOSITORY=${value}`)
       assert.ok(Number(counts?.[1]) > 90, `GITHUB_REPOSITORY=${value}: ${counts?.[1]} tests ran`)
     }
+    assert.equal(digestOf(join(decoy, ".git")), before, "a run with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE set left the decoy repository untouched")
   })
 })

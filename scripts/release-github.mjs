@@ -45,12 +45,12 @@ import {
   fetchReleases,
   ghOutput,
   nativeRunProblems,
+  packageProblems,
   releaseBranch,
   releasedTags,
   releaseHeadline,
   releaseOrder,
   releasePackageText,
-  serialise,
   tagObjectProblems,
   tagRefProblems,
 } from "./release-rules.mjs"
@@ -106,12 +106,12 @@ export function plan({ sha, nativeRun, manifestOut, env, gh, cwd }) {
   if (gitIn(cwd, ["rev-parse", "HEAD"]) !== sha) refuse(`the checkout is not ${sha.slice(0, 12)}`)
 
   const pkgText = readFileSync(join(cwd, "package.json"), "utf8")
+  const packageRefusals = packageProblems(pkgText)
+  if (packageRefusals.length) refuse(packageRefusals.join("; "))
   const pkg = JSON.parse(pkgText)
   const versionRefusal = versionProblem(pkg.version)
   if (versionRefusal) refuse(versionRefusal)
   const tag = tagFor(pkg.version)
-  if (pkg.private === true) refuse('package.json has "private": true')
-  if (serialise(pkg) !== pkgText) refuse("package.json is not in the repository's canonical JSON form")
   if (!pkg.scripts?.build) refuse('package.json has no "build" script: the release builds with npm run build')
   const changelogPath = join(cwd, "CHANGELOG.md")
   if (!existsSync(changelogPath)) refuse("there is no CHANGELOG.md: the release notes come from it")
