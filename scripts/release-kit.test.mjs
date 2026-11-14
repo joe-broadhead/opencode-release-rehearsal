@@ -1,25 +1,31 @@
 // Tests for the release kit: the CHANGELOG shape, the version and its tag, the release commit's and tag's identities, the
 // calls the kit never makes, the shape check, the workflow's plan, build, commit, tag, cleanup and sums steps against a
 // GitHub in memory, the workflow file's shape, the pack stage's tarball check, and the Release upload that never deletes
-// or replaces an asset. They run with Node's own runner and need only git; `gh` and `npm` are stand-ins:
+// or replaces an asset, the tool drift gate in the build, and check-copies.mjs's pins of the kit's own files. They run
+// with Node's own runner and need only git; `gh` and `npm` are stand-ins. drift-kit.test.mjs, imported below, tests the
+// tool capture and the drift check, and runs the drift check on this repository:
 //
 //   node --test scripts/release-kit.test.mjs
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { dirname, join } from "node:path"
 import { after, describe, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { changelogProblems, releaseNotes, shapeChangelog } from "./changelog.mjs"
+import { FIXTURE_SCHEMA, toolsDigest } from "./check-drift.mjs"
+import "./drift-kit.test.mjs"
 import { publish } from "./publish-release.mjs"
 import { pathsText } from "./release-commit.mjs"
 import { cleanup, commit, MAX_FILE, MAX_PAYLOAD, nativeAssetProblems, plan, releaseFiles, sumsProblems, tagRelease } from "./release-github.mjs"
 import {
   ACTIONS_BOT,
   allowedPath,
+  ciJobsProblems,
+  ciMatrix,
   COMMIT_MUTATION,
   commitIdentityProblems,
   fetchReleases,
@@ -609,6 +615,7 @@ describe("the calls the kit makes, and no other", () => {
     const allowed = [
       [["api", `repos/o/r/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=push&branch=master&per_page=100`]],
       [["api", "repos/o/r/actions/runs/1"]],
+      [["api", "repos/o/r/actions/runs/1/jobs?per_page=100"]],
       [["api", "repos/o/r/git/ref/heads/release/v0.0.1"]],
       [["api", "repos/o/r/git/ref/tags/v0.0.1"]],
       [["api", `repos/o/r/git/tags/${SHA}`]],
@@ -632,7 +639,7 @@ describe("the calls the kit makes, and no other", () => {
   })
 
   test("every kit script runs gh only through ghOutput, and runs only programs it names", () => {
-    for (const script of ["release-github.mjs", "release-commit.mjs", "check-release-shape.mjs", "publish-release.mjs", "attach-native.mjs", "changelog.mjs", "release-pack.mjs", "native-manifest.mjs", "tested-hosts.mjs", "release-version.mjs", "release-rules.mjs"]) {
+    for (const script of ["release-github.mjs", "release-commit.mjs", "check-release-shape.mjs", "publish-release.mjs", "attach-native.mjs", "changelog.mjs", "release-pack.mjs", "native-manifest.mjs", "tested-hosts.mjs", "release-version.mjs", "release-rules.mjs", "check-drift.mjs", "capture-tools.mjs"]) {
       const source = readFileSync(join(SCRIPTS, script), "utf8")
       // Only spawnSync, imported by name, from node:child_process; no require, no dynamic import, no other way in.
       for (const [, names] of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']node:child_process["']/g)) assert.deepEqual(names.split(",").map((name) => name.trim()).filter(Boolean), ["spawnSync"], script)
@@ -887,12 +894,21 @@ describe("check-release-shape.mjs: releases move forward from the last published
 })
 
 /** A plugin's source, as the release workflow sees it: a build, TESTED_HOSTS, and, when native, native.yml. */
+/** The four runners every plugin's CI has, and a ci.yml whose matrix runs macOS on a push to master only. */
+const RUNNERS = ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-26", "macos-26-intel"]
+const gatedLine = (key, pr, all) => `        ${key}: \${{ fromJSON(github.event_name == 'pull_request' && '${JSON.stringify(pr)}' || '${JSON.stringify(all)}') }}`
+const ciYml = (matrixLine) => `name: CI\non:\n  pull_request:\n  push:\n    branches: [master]\njobs:\n  check:\n    strategy:\n      matrix:\n${matrixLine}\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: npm run check\n`
+const CI_YML = ciYml(gatedLine("os", RUNNERS.slice(0, 2), RUNNERS))
+/** The jobs of a full master push run of that ci.yml, as GET repos/{r}/actions/runs/{id}/jobs lists them. */
+const fullJobs = (runners = RUNNERS, conclusion = "success") => runners.map((runner, index) => ({ id: 900 + index, name: `check (${runner})`, labels: [runner], status: "completed", conclusion }))
+
 const pluginSource = (version, { native = false, changelog = TWO } = {}) => ({
   "package.json": serialise({ name: "@owner/kit-test", version, private: true, scripts: { build: "node build.mjs", test: "node --test" } }),
   "CHANGELOG.md": changelog,
   ".gitignore": "dist/\nnode_modules/\n",
   "build.mjs": 'import { mkdirSync, writeFileSync } from "node:fs"\nmkdirSync("dist", { recursive: true })\nwriteFileSync("dist/index.js", "export default 1\\n")\nwriteFileSync("dist/tui.js", "export default 2\\n")\n',
   "src/host.ts": 'export const TESTED_HOSTS = ["9.8.1", "9.8.4"] as const\n',
+  ".github/workflows/ci.yml": CI_YML,
   ...(native ? { ".github/workflows/native.yml": "name: native\n" } : {}),
 })
 
@@ -916,7 +932,7 @@ const nativeManifest = ({ tag, commit, run = 77 }) => ({
  * call; `onCommit(apiCommit)` may change what GitHub answers about a new commit.
  */
 function fakeGitHub(repo, { onCommit, mergeBase } = {}) {
-  const state = { refs: new Map(), tagObjects: new Map(), commits: new Map(), runs: new Map(), manifests: new Map(), ciRuns: [], releases: [] }
+  const state = { refs: new Map(), tagObjects: new Map(), commits: new Map(), runs: new Map(), manifests: new Map(), ciRuns: [], ciJobs: fullJobs(), releases: [] }
   const calls = []
   let made = 0
   const notFound = () => {
@@ -944,6 +960,7 @@ function fakeGitHub(repo, { onCommit, mergeBase } = {}) {
     }
     if (method === "GET") {
       if (path.startsWith("actions/workflows/ci.yml/runs?")) return JSON.stringify({ workflow_runs: state.ciRuns })
+      if (hit(/^actions\/runs\/(\d+)\/jobs\?per_page=100$/)) return JSON.stringify({ total_count: state.ciJobs.length, jobs: state.ciJobs })
       if (hit(/^actions\/runs\/(\d+)$/)) return JSON.stringify(state.runs.get(match[1]) ?? notFound())
       if (hit(/^git\/ref\/(.+)$/)) {
         const ref = state.refs.get(match[1]) ?? notFound()
@@ -1039,6 +1056,32 @@ describe("release-github.mjs plan", () => {
     assert.throws(run, /\(run 502\) concluded cancelled/)
     github.state.ciRuns = [ciRun(repo.head, { event: "pull_request" }), ciRun("f".repeat(40))]
     assert.throws(run, /no ci\.yml run for a push to master/)
+  })
+
+  test("stands on the master push run with a successful job on every runner, macOS too, and never on a pull request's", () => {
+    const { github, run } = setup()
+    assert.equal(run().ci_run, "501")
+    assert.ok(github.calls.some((call) => call.args[1] === "repos/owner/kit-test/actions/runs/501/jobs?per_page=100"), "the planner read the push run's jobs")
+    assert.ok(github.calls.some((call) => /actions\/workflows\/ci\.yml\/runs\?head_sha=[0-9a-f]{40}&event=push&branch=master&per_page=100$/.test(call.args[1])), "it asked for push runs on master only")
+    github.state.ciJobs = fullJobs(RUNNERS.slice(0, 2))
+    assert.throws(() => run(), /CI run 501 on [0-9a-f]{12} is not a full master push run: no successful job on macos-26; no successful job on macos-26-intel/)
+    github.state.ciJobs = [...fullJobs(RUNNERS.slice(0, 3)), ...fullJobs(["macos-26-intel"], "skipped")]
+    assert.throws(() => run(), /no successful job on macos-26-intel/)
+    github.state.ciJobs = fullJobs()
+    github.state.ciRuns = [ciRun(github.state.ciRuns[0].head_sha, { event: "pull_request", head_branch: "feature" })]
+    assert.throws(() => run(), /no ci\.yml run for a push to master/)
+  })
+
+  test("refuses a ci.yml whose matrix runs macOS on pull requests, or not on master", () => {
+    for (const [line, problem] of [
+      ["        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel]", /names a macOS runner outside the matrix gated by event/],
+      [gatedLine("os", RUNNERS, RUNNERS), /a pull request runs a macOS runner/],
+    ]) {
+      const repo = repository({ ...pluginSource("0.0.1"), ".github/workflows/ci.yml": ciYml(line) })
+      const github = fakeGitHub(repo)
+      github.state.ciRuns = [ciRun(repo.head)]
+      assert.throws(() => plan({ sha: repo.head, env: ENV(repo), gh: github.gh, cwd: repo.dir }), problem)
+    }
   })
 
   test("refuses a version or a CHANGELOG that is not ready", () => {
@@ -1180,6 +1223,56 @@ describe("release-commit.mjs: the build step", () => {
     const out = join(folder(), "files")
     assert.equal(repo.node("release-commit.mjs", ["--sha", repo.head, "--out", out, "--manifest", manifest]).status, 0)
     assert.match(readFileSync(join(out, "paths.txt"), "utf8"), / {2}manifest\/native\.json\n/)
+  })
+
+  // A plugin that declares one served tool, with a capture of the given date and its provenance.
+  const captured = (listedAt, { served = [{ name: "search", readOnlyHint: true }], waiver } = {}) => {
+    const tools = served.map((tool) => ({ ...tool, inputSchema: { type: "object", properties: {} } }))
+    const capture = { schema: FIXTURE_SCHEMA, evidence: "live-observed", listedAt, server: "demo", namespace: "demo", count: tools.length, digest: toolsDigest(tools), tools }
+    const pkg = { name: "@owner/kit-test", version: "0.0.1", private: true, scripts: { build: "node build.mjs", test: "node --test" }, jelly: { tools: [{ name: "demo.search", permission: "demo_search", effect: "allow", readOnly: true }] } }
+    return {
+      ...pluginSource("0.0.1"),
+      "package.json": serialise(pkg),
+      "test/fixtures/live-tools.json": `${JSON.stringify(capture, null, 2)}\n`,
+      "test/fixtures/provenance.json": `${JSON.stringify({ captures: [{ fixture: "live-tools.json", listedAt, digest: { value: capture.digest } }], live: { fixture: "live-tools.json", listedAt }, ...(waiver ? { waiver } : {}) }, null, 2)}\n`,
+    }
+  }
+  const daysAgo = (days) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
+
+  test("runs the tool drift gate first: a capture at most 14 days old passes, an older one is refused before npm runs", () => {
+    const fresh = repository(captured(daysAgo(3)))
+    const passed = build(fresh)
+    assert.equal(passed.status, 0, passed.stderr)
+    assert.match(passed.stdout, /No drift: 1 served tools \(live-observed, /)
+    const stale = repository(captured(daysAgo(20)))
+    const refused = build(stale)
+    assert.equal(refused.status, 1)
+    assert.match(refused.stdout, /FAIL capture-stale \(the capture is 20 days old; a release needs one at most 14 days old/)
+    assert.match(refused.stderr, /release-commit: the tool drift check failed \(1 finding\(s\) above\)/)
+    assert.equal(readdirSync(stale.dir).includes("dist"), false, "nothing was built")
+  })
+
+  test("a waiver in provenance.json for exactly that capture lets an older one through, as a warning on the run", () => {
+    const listedAt = daysAgo(20)
+    const repo = repository(captured(listedAt, { waiver: { listedAt, reason: "the provider's sign-in was down", approvedBy: "the owner" } }))
+    const result = build(repo, [], { GITHUB_ACTIONS: "true" })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /::warning title=tool drift \(capture-stale\)::WARN capture-stale \(the capture is 20 days old \(gate: 14\); waived by the owner: the provider's sign-in was down\)/)
+    const other = repository(captured(listedAt, { waiver: { listedAt: daysAgo(40), reason: "an older capture's", approvedBy: "the owner" } }))
+    assert.equal(build(other).status, 1)
+  })
+
+  test("refuses a declaration that drifts from its capture; a plugin with no capture yet releases with a warning", () => {
+    const drift = repository(captured(daysAgo(1), { served: [{ name: "search", readOnlyHint: true }, { name: "send", readOnlyHint: false }] }))
+    const refused = build(drift)
+    assert.equal(refused.status, 1)
+    assert.match(refused.stdout, /FAIL served-not-declared demo\.send \(a write; not fenced from read-only helpers\)/)
+    const source = captured(daysAgo(1))
+    delete source["test/fixtures/live-tools.json"]
+    delete source["test/fixtures/provenance.json"]
+    const result = build(repository(source), [], { GITHUB_ACTIONS: "true" })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /::warning title=tool drift \(no-capture\)::WARN no-capture/)
   })
 
   test("refuses a build that changes tracked files or writes a package.json under dist/", () => {
@@ -1805,6 +1898,97 @@ describe("package.json: private, and in the canonical form", () => {
   })
 })
 
+describe("CI: macOS on pushes to master and for releases, never on pull requests", () => {
+  test("ciMatrix: a pull request's matrix has no macOS entry, and a master push's does", () => {
+    assert.deepEqual(ciMatrix(CI_YML), { pullRequest: ["ubuntu-24.04", "ubuntu-24.04-arm"], push: RUNNERS, problems: [] })
+    const include = [
+      { runner: "macos-26", target: "darwin-arm64" },
+      { runner: "ubuntu-24.04", target: "linux-x64-gnu" },
+    ]
+    assert.deepEqual(ciMatrix(ciYml(gatedLine("include", include.slice(1), include))), { pullRequest: ["ubuntu-24.04"], push: ["macos-26", "ubuntu-24.04"], problems: [] })
+  })
+
+  test("ciMatrix refuses a static matrix, macOS on a pull request, no macOS on a push, different Linux entries, and macOS elsewhere", () => {
+    const problems = (line, extra = "") => ciMatrix(`${ciYml(line)}${extra}`).problems.join("; ")
+    assert.match(problems("        os: [ubuntu-24.04, macos-26]"), /line 10 names a macOS runner outside the matrix gated by event; no matrix is gated by event/)
+    assert.match(problems(gatedLine("os", ["ubuntu-24.04", "macos-26"], ["ubuntu-24.04", "macos-26"])), /a pull request runs a macOS runner/)
+    assert.match(problems(gatedLine("os", ["ubuntu-24.04"], ["ubuntu-24.04"])), /a push to master runs no macOS runner/)
+    assert.match(problems(gatedLine("os", ["ubuntu-24.04"], RUNNERS)), /the pull request entries are not every entry without the macOS ones/)
+    assert.match(problems(gatedLine("os", RUNNERS.slice(0, 2), RUNNERS), "  other:\n    runs-on: macos-26\n"), /names a macOS runner outside the matrix gated by event/)
+    assert.equal(problems(gatedLine("os", RUNNERS.slice(0, 2), RUNNERS), "  # macos-26 is named in a comment only\n"), "")
+    assert.match(problems("        os: ${{ fromJSON(github.event_name == 'pull_request' && '[ubuntu' || '[]') }}"), /are not JSON/)
+  })
+
+  test("ciJobsProblems names each runner without a successful job", () => {
+    assert.deepEqual(ciJobsProblems(fullJobs(), RUNNERS), [])
+    assert.deepEqual(ciJobsProblems([...fullJobs(RUNNERS.slice(0, 3)), ...fullJobs(["macos-26-intel"], "cancelled")], RUNNERS), ["no successful job on macos-26-intel"])
+    assert.deepEqual(ciJobsProblems(undefined, ["macos-26"]), ["no successful job on macos-26"])
+  })
+
+  test("this repository's ci.yml: a pull request's matrix has no macOS entry, and a master push's does (npm run check)", () => {
+    const matrix = ciMatrix(readFileSync(join(SCRIPTS, "..", ".github", "workflows", "ci.yml"), "utf8"))
+    assert.deepEqual(matrix.problems, [])
+    assert.equal(matrix.pullRequest.some((runner) => /^macos-/.test(runner)), false)
+    assert.ok(matrix.push.includes("macos-26") && matrix.push.includes("macos-26-intel"), `a push to master runs ${matrix.push.join(", ")}`)
+  })
+})
+
+// The kit is one version in every plugin. check-copies.mjs, the family's check of shared copies, pins each of its files whole,
+// so a plugin whose kit differs from the family's fails `npm run check`.
+describe("the kit's own files: pinned in check-copies.mjs", () => {
+  const KIT_FILES = [
+    "scripts/attach-native.mjs",
+    "scripts/capture-tools.mjs",
+    "scripts/changelog.mjs",
+    "scripts/check-drift.mjs",
+    "scripts/check-release-plugin-add.sh",
+    "scripts/check-release-shape.mjs",
+    "scripts/drift-kit.test.mjs",
+    "scripts/native-manifest.mjs",
+    "scripts/publish-release.mjs",
+    "scripts/release-commit.mjs",
+    "scripts/release-github.mjs",
+    "scripts/release-kit.test.mjs",
+    "scripts/release-pack.mjs",
+    "scripts/release-rules.mjs",
+    "scripts/release-version.mjs",
+    "scripts/tested-hosts.mjs",
+  ]
+  const ROOT = join(SCRIPTS, "..")
+  const hashOf = (path) => createHash("sha256").update(readFileSync(join(ROOT, path), "utf8").replaceAll("\r\n", "\n")).digest("hex")
+
+  test("check-copies.mjs pins each kit file whole, at the hash of this repository's copy", () => {
+    const text = readFileSync(join(SCRIPTS, "check-copies.mjs"), "utf8")
+    const missing = []
+    const differ = []
+    for (const path of KIT_FILES) {
+      const match = new RegExp(`\\{ path: "${path.replaceAll(".", "\\.")}", optional: false, sha256: "([0-9a-f]{64})", part: \\(text\\) => text \\}`).exec(text)
+      if (!match) missing.push(path)
+      else if (match[1] !== hashOf(path)) differ.push(path)
+    }
+    assert.deepEqual({ missing, differ }, { missing: [], differ: [] })
+  })
+
+  test("the kit is whole: every script a kit file imports from scripts/ is a kit file", () => {
+    for (const path of KIT_FILES.filter((item) => item.endsWith(".mjs"))) {
+      for (const [, name] of readFileSync(join(ROOT, path), "utf8").matchAll(/(?:\bfrom|^import)\s*["']\.\/([\w.-]+)["']/gm)) assert.ok(KIT_FILES.includes(`scripts/${name}`), `${path} imports scripts/${name}`)
+    }
+  })
+
+  test("check-copies.mjs fails a copy of the kit with one file changed, and names it", () => {
+    const dir = folder()
+    for (const path of [...KIT_FILES, "scripts/check-copies.mjs"]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true })
+      writeFileSync(join(dir, path), readFileSync(join(ROOT, path)))
+    }
+    appendFileSync(join(dir, "scripts", "release-rules.mjs"), "// a local change\n")
+    const result = spawnSync(process.execPath, ["scripts/check-copies.mjs"], { cwd: dir, encoding: "utf8" })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /DRIFT: scripts\/release-rules\.mjs/)
+    assert.match(result.stdout, /same: scripts\/check-drift\.mjs/)
+  })
+})
+
 // CI sets GITHUB_REPOSITORY to the plugin's own repository, and a shell may set it to anything. The kit tests pass the
 // repository they mean explicitly, so they must pass whatever the ambient value is: this runs them again, at once, with it
 // unset, set to the o/r the rule tests name, and set to another repository.
@@ -1813,8 +1997,16 @@ describe("the kit tests, whatever the ambient GITHUB_REPOSITORY and GIT_ variabl
     // A decoy repository that git would use if the tests inherited GIT_DIR and friends (as under `git rebase --exec`).
     const decoy = folder()
     const decoyGit = (...args) => spawnSync("git", args, { cwd: decoy, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } })
+    // The decoy's one commit is made with plumbing: a porcelain `git commit` starts git's background auto-maintenance
+    // (detached, in newer git), which could write into the decoy's .git after the digest below and fail this test with
+    // nothing leaking. Auto-maintenance and auto-gc are off in the decoy as well.
     decoyGit("init", "-q", "-b", "master")
-    decoyGit("-c", "user.name=decoy", "-c", "user.email=decoy@example.invalid", "commit", "-q", "--allow-empty", "-m", "decoy")
+    decoyGit("config", "maintenance.auto", "false")
+    decoyGit("config", "gc.auto", "0")
+    const tree = decoyGit("write-tree").stdout.trim()
+    const commit = spawnSync("git", ["commit-tree", tree, "-m", "decoy"], { cwd: decoy, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "decoy", GIT_AUTHOR_EMAIL: "decoy@example.invalid", GIT_COMMITTER_NAME: "decoy", GIT_COMMITTER_EMAIL: "decoy@example.invalid" } }).stdout.trim()
+    assert.match(commit, /^[0-9a-f]{40}$/, "the decoy has a commit")
+    decoyGit("update-ref", "refs/heads/master", commit)
     const digestOf = (dir) => {
       const hash = createHash("sha256")
       const walk = (at) => {

@@ -1,6 +1,6 @@
 {
   "name": "@joe-broadhead/opencode-release-rehearsal",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "TEST ONLY: a rehearsal of the release kit, copied from opencode-tavily. Not a plugin to install: it has no Jelly declaration and its plugin id is rehearsal.kit.",
   "keywords": [
@@ -46,7 +46,8 @@
     "check": "npm run typecheck && npm run build && npm test && npm run test:kit && npm run test:tui && npm run test:host && npm run test:pack && npm run lint && npm run icons && npm run actionlint",
     "check:upstream": "bun tools/check-upstream.mjs",
     "icons": "node scripts/check-icons.mjs",
-    "actionlint": "node scripts/check-actionlint.mjs"
+    "actionlint": "node scripts/check-actionlint.mjs",
+    "capture": "node scripts/capture-tools.mjs"
   },
   "devDependencies": {
     "@babel/core": "7.29.7",

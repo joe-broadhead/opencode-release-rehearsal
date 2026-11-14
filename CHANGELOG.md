@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2026-11-14
+
+### Changed
+
+- Release kit revision `f1fdd30`: the tool drift check. `scripts/check-drift.mjs` checks a plugin's Jelly declaration,
+  registry, skills and docs against its committed capture of the provider's tool list, offline in `npm run check`, and the
+  release build runs it as a gate that refuses a capture more than 14 days old unless `provenance.json` holds a written
+  waiver for it. `scripts/capture-tools.mjs` (`npm run capture`, by hand only) writes the capture, with the signed-in
+  account's own values replaced by placeholders. This rehearsal has no Jelly declaration, so the gate has nothing to check
+  and says so.
+- `scripts/check-copies.mjs` pins the release kit's 16 files, so a copy that differs from the family's fails
+  `npm run check`.
+- CI runs the macOS runners on pushes to `master` and for releases only; a pull request runs the Linux runners. The
+  release planner requires the `master` push run, with a successful job on every runner, macOS too.
+
 ## [0.0.2] - 2026-11-14
 
 ### Changed

@@ -50,7 +50,8 @@ a `## [x.y.z] - YYYY-MM-DD` heading below it, newest first, and the npm history 
    `CONTRIBUTING.md` and `docs/` to `#v<version>` (`test/docs.test.ts` fails until they match). Then run
    `node scripts/changelog.mjs release`: it turns `## [Unreleased]` into `## [<version>] - <today>`, above the earlier
    releases, and refuses a CHANGELOG it cannot shape. Run `npm run check`.
-2. Push that commit to `master`, and wait for CI to pass on it.
+2. Push that commit to `master`, and wait for CI to pass on it. A pull request's CI runs the Linux runners only; the
+   push to `master` runs every runner, macOS too, and the release stands on that run.
 3. Start the release with that commit's full sha:
    `gh workflow run release.yml --ref master -f sha=<full sha>`, or from Actions → release →
    Run workflow, on `master`.
@@ -66,14 +67,28 @@ a `## [x.y.z] - YYYY-MM-DD` heading below it, newest first, and the npm history 
 it, and `npm pack` still packs the release tarball. It is kept in its canonical form, `JSON.stringify(pkg, null, 2)` and
 one newline: the kit tests check both in `npm run check`, as the release planner does.
 
+The declaration is checked against what the provider serves. `npm run capture` (`scripts/capture-tools.mjs`, run by hand
+through the signed-in OpenCode, never by CI) writes `test/fixtures/live-tools.json` and `test/fixtures/provenance.json`,
+with the signed-in account's own values that some servers write into descriptions (Slack's "Your user_id: …") replaced
+by placeholders such as `U00CURRENTUSER`; the drift check fails a committed capture that still holds one.
+`scripts/check-drift.mjs` checks `jelly.tools`, `test/fixtures/tool-registry.json`, the skills and the docs against them,
+offline, in the kit tests of `npm run check`. The release build runs it with `--release`, which also refuses a capture
+more than 14 days old, unless `provenance.json` holds the owner's written waiver for exactly that capture:
+`"waiver": { "listedAt": "<the capture's date>", "reason": "…", "approvedBy": "…" }` (a new capture drops it). A plugin
+with no capture yet, or only a names-only one, releases with a warning on the run; one that serves only its own tools
+says so with `"upstream": "none"` in the registry.
+
 Before the approval, the workflow:
 - **plans:** refuses a run that is not on `master`, a sha that is not `master`'s head, a sha without a successful
-  `ci.yml` push run, a version that is not `x.y.z`, a `package.json` that is not `"private": true` or not in its
-  canonical form, a CHANGELOG whose newest release is not this version, a release that does not move forward from the
-  last published Release, a leftover `release/v<version>` branch, a native run that did not build this sha on `master`,
-  by hand, with success, and a missing `native_run` (or one given to a plugin that is not native);
-- **builds** `dist/` with `npm ci --ignore-scripts` and `npm run build`, with a read-only token, and writes the release
-  files: `dist/`, `package.json` without its lifecycle scripts, and the vetted native manifest;
+  `ci.yml` push run with a successful job on every runner its push matrix names (macOS included), a `ci.yml` whose
+  matrix runs macOS on a pull request or not on a push (the kit tests check it too), a version that is not `x.y.z`, a
+  `package.json` that is not `"private": true` or not in its canonical form, a CHANGELOG whose newest release is not
+  this version, a release that does not move forward from the last published Release, a leftover `release/v<version>`
+  branch, a native run that did not build this sha on `master`, by hand, with success, and a missing `native_run` (or
+  one given to a plugin that is not native);
+- **builds**: refuses a failing tool drift check (`scripts/check-drift.mjs --release`, above), then builds `dist/` with
+  `npm ci --ignore-scripts` and `npm run build`, with a read-only token, and writes the release files: `dist/`,
+  `package.json` without its lifecycle scripts, and the vetted native manifest;
 - **commits** them on a temporary branch `release/v<version>` at the parent, through GitHub's API with the workflow's token,
   so GitHub signs the commit (author `github-actions[bot]`, committer GitHub). This job runs no npm. It refuses a commit
   that GitHub does not verify, or whose parent or tree is not the one the files give;
@@ -126,9 +141,11 @@ release tags; never push one by hand.
 The release kit is these files, the same in every plugin: `scripts/release-rules.mjs`, `scripts/release-commit.mjs`,
 `scripts/release-github.mjs`, `scripts/check-release-shape.mjs`, `scripts/changelog.mjs`, `scripts/release-version.mjs`,
 `scripts/release-pack.mjs`, `scripts/publish-release.mjs`, `scripts/attach-native.mjs`, `scripts/native-manifest.mjs`,
-`scripts/tested-hosts.mjs`, `scripts/check-release-plugin-add.sh`, `scripts/release-kit.test.mjs` and
-`.github/workflows/release.yml`. Do not re-run the older `apply-release-kit.mjs`: it writes back the kit that could
-release only `v0.0.0`.
+`scripts/tested-hosts.mjs`, `scripts/check-release-plugin-add.sh`, `scripts/check-drift.mjs`, `scripts/capture-tools.mjs`,
+`scripts/release-kit.test.mjs`, `scripts/drift-kit.test.mjs` and `.github/workflows/release.yml`. `scripts/check-copies.mjs`
+pins each of the scripts whole by its sha256, so a plugin whose copy differs from the family's fails `npm run check`:
+change the kit in every plugin at once, with the new hashes. Do not re-run the older `apply-release-kit.mjs`: it writes
+back the kit that could release only `v0.0.0`.
 
 Each release has its own tag, and a Git install does not update by itself. To move to a newer release, remove the old entry with `opencode plugin remove github:joe-broadhead/opencode-tavily#v0.0.0`, then add the new tag with `opencode plugin add github:joe-broadhead/opencode-tavily#v<version>`.
 

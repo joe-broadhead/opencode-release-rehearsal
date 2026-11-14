@@ -3,7 +3,8 @@
 //
 //   plan    --sha <P> [--native-run <id>] [--manifest-out <file>]
 //           Refuses a release that must not start: a run not on master, a sha that is not master's head, no green CI on
-//           it, a version or CHANGELOG not ready, a leftover release branch, a release that does not move forward, a
+//           it (the master push run of ci.yml, with a successful job on every runner its push matrix names, macOS too;
+//           a pull request's run, Linux only, never counts), a version or CHANGELOG not ready, a leftover release branch, a release that does not move forward, a
 //           native run that is wrong, or one given to a plugin that is not native. Finds a tag left by a run that failed
 //           after tagging (mode resume). Writes version, tag, hosts, native, mode, commit, ci_run and manifest_sha256 (the
 //           vetted native manifest's, which the commit job requires byte for byte) to GITHUB_OUTPUT.
@@ -40,6 +41,8 @@ import {
   ACTIONS_BOT,
   allowedPath,
   api,
+  ciJobsProblems,
+  ciMatrix,
   COMMIT_MUTATION,
   commitIdentityProblems,
   fetchReleases,
@@ -126,6 +129,14 @@ export function plan({ sha, nativeRun, manifestOut, env, gh, cwd }) {
 
   const ci = ciProblem(api(gh, `repos/${repository}/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&branch=master&per_page=100`).workflow_runs, sha)
   if (ci.problem) refuse(ci.problem)
+  // A pull request's CI runs Linux only; the master push run has every runner, macOS too, and the release stands on it:
+  // each runner its matrix names on a push must have a successful job in that run.
+  const ciPath = join(cwd, ".github", "workflows", "ci.yml")
+  if (!existsSync(ciPath)) refuse("there is no .github/workflows/ci.yml: the release stands on its master push run")
+  const matrix = ciMatrix(readFileSync(ciPath, "utf8"))
+  if (matrix.problems.length) refuse(`.github/workflows/ci.yml: ${matrix.problems.join("; ")}`)
+  const missingJobs = ciJobsProblems(api(gh, `repos/${repository}/actions/runs/${ci.run.id}/jobs?per_page=100`).jobs, matrix.push)
+  if (missingJobs.length) refuse(`CI run ${ci.run.id} on ${sha.slice(0, 12)} is not a full master push run: ${missingJobs.join("; ")}`)
 
   let manifestText = ""
   if (run !== undefined) {

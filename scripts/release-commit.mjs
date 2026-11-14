@@ -9,7 +9,9 @@
 //
 // The folder holds the files at their repository paths, and paths.txt: one `<sha256>  <path>` line per file, sorted, so
 // the commit job can tell that it received exactly what was built. Refuses: a dirty tree, a head other than --sha, a
-// version that is not x.y.z, a package.json that is not private or not in its canonical form (packageProblems), no build script, a native plugin
+// version that is not x.y.z, a package.json that is not private or not in its canonical form (packageProblems), no build
+// script, a failing tool drift check (check-drift.mjs --release: the declaration against the committed capture, which must
+// be at most 14 days old unless provenance.json waives it; a plugin with no capture yet passes with a warning), a native plugin
 // (one with .github/workflows/native.yml) without --manifest or a plugin that is not native with one, a manifest that
 // does not name this tag and commit, a build that changes tracked files or builds no dist/, and a built path outside the
 // allowed set or that is not a regular file.
@@ -18,6 +20,7 @@ import { createHash } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { driftReport, reportLines } from "./check-drift.mjs"
 import { MANIFEST_PATH, manifestProblems } from "./native-manifest.mjs"
 import { allowedPath, packageProblems, releasePackageText } from "./release-rules.mjs"
 import { tagFor, versionProblem } from "./release-version.mjs"
@@ -83,6 +86,17 @@ function main() {
   if (versionRefusal) die(versionRefusal)
   const tag = tagFor(pkg.version)
   if (!pkg.scripts?.build) die('package.json has no "build" script: the release builds with npm run build')
+
+  // The tool drift gate, before anything is installed or built. Its warnings (no capture yet, a names-only capture) show
+  // on the run as annotations; a FAIL stops the release.
+  let drift
+  try {
+    drift = driftReport(root, { release: true })
+  } catch (error) {
+    die(`the tool drift check could not run: ${error.message}`)
+  }
+  for (const line of reportLines(drift)) console.log(line)
+  if (drift.failed.length) die(`the tool drift check failed (${drift.failed.length} finding(s) above): fix them, or capture again with npm run capture`)
 
   const native = existsSync(join(root, NATIVE_WORKFLOW))
   if (native && !options.manifest) die(`this plugin is native (${NATIVE_WORKFLOW}), and no vetted manifest was given`)

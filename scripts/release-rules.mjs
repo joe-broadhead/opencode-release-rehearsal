@@ -167,6 +167,60 @@ export function fetchReleases(repository, gh) {
   }
 }
 
+/** A macOS runner label. */
+export const MACOS = /^macos-/
+
+/**
+ * The CI matrix of .github/workflows/ci.yml by event. macOS runs on pushes to master and for releases only, never on pull
+ * requests: every matrix that names runners is one line,
+ *   <key>: ${{ fromJSON(github.event_name == 'pull_request' && '<pull request entries>' || '<every entry>') }}
+ * with `os` (runner labels) or `include` (objects with a `runner` or `os` label) as the key. The pull request entries are
+ * every entry without the macOS ones, in the same order, so Linux coverage is the same on both. No other line names a
+ * macOS runner. Returns { pullRequest, push, problems }: the runner labels each event runs, and what breaks the rule.
+ */
+export function ciMatrix(text) {
+  const problems = []
+  const pullRequest = []
+  const push = []
+  const GATED = /^\s+([\w-]+): \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '([^']*)' \|\| '([^']*)'\) \}\}\s*$/
+  const labelOf = (entry) => (typeof entry === "string" ? entry : (entry?.runner ?? entry?.os))
+  let gated = 0
+  String(text ?? "")
+    .split("\n")
+    .forEach((line, index) => {
+      const match = GATED.exec(line)
+      if (!match) {
+        if (!/^\s*#/.test(line) && /\bmacos-[\w.-]+/.test(line)) problems.push(`line ${index + 1} names a macOS runner outside the matrix gated by event`)
+        return
+      }
+      gated++
+      let entries
+      try {
+        entries = [JSON.parse(match[2]), JSON.parse(match[3])]
+      } catch {
+        problems.push(`line ${index + 1}: the matrix's lists are not JSON`)
+        return
+      }
+      const [pr, all] = entries
+      if (!Array.isArray(pr) || !Array.isArray(all) || !all.length || all.some((entry) => typeof labelOf(entry) !== "string")) {
+        problems.push(`line ${index + 1}: each list must be a non-empty array of runner labels, or of objects with a runner or os label`)
+        return
+      }
+      if (pr.some((entry) => MACOS.test(labelOf(entry)))) problems.push(`line ${index + 1}: a pull request runs a macOS runner`)
+      if (!all.some((entry) => MACOS.test(labelOf(entry)))) problems.push(`line ${index + 1}: a push to master runs no macOS runner`)
+      if (JSON.stringify(pr) !== JSON.stringify(all.filter((entry) => !MACOS.test(labelOf(entry))))) problems.push(`line ${index + 1}: the pull request entries are not every entry without the macOS ones`)
+      pullRequest.push(...pr.map(labelOf))
+      push.push(...all.map(labelOf))
+    })
+  if (!gated) problems.push("no matrix is gated by event: macOS runs on pushes to master only, `<key>: ${{ fromJSON(github.event_name == 'pull_request' && '<Linux entries>' || '<every entry>') }}`")
+  return { pullRequest: [...new Set(pullRequest)], push: [...new Set(push)], problems }
+}
+
+/** What a master push run of ci.yml (its jobs, GET repos/{r}/actions/runs/{id}/jobs) lacks: a successful job on each runner. */
+export function ciJobsProblems(jobs, runners) {
+  return runners.filter((runner) => !(jobs ?? []).some((job) => (job.labels ?? []).includes(runner) && job.conclusion === "success")).map((runner) => `no successful job on ${runner}`)
+}
+
 /** The one GraphQL request the kit sends: the release commit (scripts/release-github.mjs commit). */
 export const COMMIT_MUTATION = "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }"
 
@@ -182,6 +236,7 @@ const SHA_EXACT = exact(SHA)
 const READS = [
   `repos/${REPO}/actions/workflows/ci\\.yml/runs\\?head_sha=${SHA}&event=push&branch=master&per_page=100`,
   `repos/${REPO}/actions/runs/\\d+`,
+  `repos/${REPO}/actions/runs/\\d+/jobs\\?per_page=100`,
   `repos/${REPO}/git/ref/heads/release/${TAG}`,
   `repos/${REPO}/git/ref/tags/${TAG}`,
   `repos/${REPO}/git/tags/${SHA}`,
