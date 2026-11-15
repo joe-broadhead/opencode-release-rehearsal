@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] - 2026-11-15
+
+### Changed
+
+- Release kit revision `e26aef8` (r4.1). Nothing a plugin's `npm run conformance` writes can replace the release
+  tarball: the conformance job uploads only `conformance-report.json`; the pack job records the kept tarball's sha256
+  before any dependency is installed; the stage job takes only the report, into a folder of its own, and checks after
+  every download, and publish again after the approval, that the staged tarball has that sha256. A conformance report
+  must name the plugin, and is at most 256 KiB.
+
 ## [0.0.4] - 2026-11-15
 
 ### Changed

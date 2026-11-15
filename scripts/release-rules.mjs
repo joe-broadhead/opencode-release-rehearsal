@@ -175,6 +175,8 @@ export function fetchReleases(repository, gh) {
 export const CONFORMANCE_REPORT = "reports/conformance-report.json"
 /** The report's name as a Release asset, and in SHA256SUMS. */
 export const CONFORMANCE_ASSET = "conformance-report.json"
+/** The most bytes a conformance report may have (the family's are under 10 KB). */
+export const CONFORMANCE_MAX_BYTES = 256 * 1024
 
 /** True when package.json declares sources. */
 export const declaresSources = (pkg) => pkg !== null && typeof pkg === "object" && Object.hasOwn(pkg, "sources") && pkg.sources !== undefined
@@ -189,10 +191,13 @@ export function conformanceSetupProblems(pkg) {
 }
 
 /**
- * Why a conformance report cannot be released with this package: it is not one JSON object, its `ok` is not true, or it
- * names another plugin or version. The kit reads only these three keys; the rest is the source contract's.
+ * Why a conformance report cannot be released with this package: it is over CONFORMANCE_MAX_BYTES, it is not one JSON
+ * object, its `ok` is not true, or it does not name this plugin and version. The kit reads only these three keys; the rest
+ * is the source contract's.
  */
 export function conformanceReportProblems(text, pkg) {
+  const bytes = Buffer.byteLength(String(text ?? ""), "utf8")
+  if (bytes > CONFORMANCE_MAX_BYTES) return [`${CONFORMANCE_REPORT} has ${bytes} bytes, over the ${CONFORMANCE_MAX_BYTES} a conformance report may have`]
   let report
   try {
     report = JSON.parse(text)
@@ -203,7 +208,7 @@ export function conformanceReportProblems(text, pkg) {
   const problems = []
   if (report.ok !== true) problems.push(`the conformance report is not ok (ok: ${JSON.stringify(report.ok)}): the source contract's conformance kit failed`)
   if (report.version !== pkg.version) problems.push(`the conformance report is for version ${JSON.stringify(report.version)}, not ${pkg.version}`)
-  if (report.plugin !== undefined && report.plugin !== pkg.name) problems.push(`the conformance report is for ${JSON.stringify(report.plugin)}, not ${pkg.name}`)
+  if (report.plugin !== pkg.name) problems.push(`the conformance report is for ${JSON.stringify(report.plugin)}, not ${pkg.name}`)
   return problems
 }
 

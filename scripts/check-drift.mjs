@@ -165,7 +165,8 @@ export const FAMILY_BLOCK = familyBlockOf(readFileSync(new URL("./jelly-family-b
 
 /**
  * Sentences of a plugin's own docs/jelly.md (outside the block, code left out) that contradict the block. The one
- * unambiguous case fails: an effect of allow said to make, let or mean a tool runs (sentence 4: allow changes nothing).
+ * unambiguous case fails: an effect of allow, or a tool declared allow, said to make, let or mean a tool runs (sentence 4:
+ * allow changes nothing).
  * Looser matches warn: the same words without the causal verb; a tool asking or being off at Allowed (sentence 1); deny
  * at Allowed (sentence 6); an undeclared tool running at Ask before changes or Read only (sentences 2 and 3).
  */
@@ -176,9 +177,10 @@ export function familyContradictions(text) {
   for (const match of sentences) {
     const sentence = match[0].replace(/\s+/g, " ").trim()
     const line = prose.slice(0, match.index).split("\n").length
-    const allowEffect = /`?effect`?[^.]{0,40}`?\ballow\b`?|\ballow\b`?\s+effect/i.test(sentence)
+    // An effect of allow, or a tool declared allow ("Every tool is declared `allow`, so a Jelly agent runs …").
+    const allowEffect = /`?effect`?[^.]{0,40}`?\ballow\b`?|\ballow\b`?\s+effect|\b(?:declared|is|are|with|as)\s+`?allow\b/i.test(sentence)
     if (allowEffect && /\b(lets|makes|means|so that|so)\b[^.]{0,50}\b(run|runs)\b(?! only)/i.test(sentence) && !/changes nothing|follows the access/i.test(sentence)) {
-      found.push({ level: "fail", line, sentence, detail: "an effect of allow is said to make a tool run; jelly's shared block: \"A declared `effect` of `allow` changes nothing\"" })
+      found.push({ level: "fail", line, sentence, detail: "an effect of allow (or a tool declared allow) is said to make a tool run; jelly's shared block: \"A declared `effect` of `allow` changes nothing\"" })
     } else if (allowEffect && /\bruns?\b[^.]{0,30}\bwithout asking\b/i.test(sentence) && !/changes nothing|follows the access|at Allowed|`all`/i.test(sentence)) {
       found.push({ level: "warn", line, sentence, detail: "an effect of allow beside a tool running without asking: allow changes nothing (the block's fourth sentence)" })
     }
