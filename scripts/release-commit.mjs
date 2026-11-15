@@ -6,6 +6,13 @@
 // (scripts/release-github.mjs commit).
 //
 //   node scripts/release-commit.mjs --sha <full sha of the checkout> --out <empty folder> [--manifest <vetted native.json>]
+//   node scripts/release-commit.mjs conformance --sha <full sha of the checkout> --out <empty folder>
+//
+// The conformance mode is the release workflow's `conformance` job, for a plugin that declares sources: in a clean
+// checkout of the parent, `npm ci --ignore-scripts`, then the repository's own `npm run conformance`, which runs the source
+// contract's conformance kit and writes reports/conformance-report.json. It refuses a failing run, a missing report, and
+// a report that is not ok or names another version, and copies the report to the folder as conformance-report.json, the
+// Release asset the stage job lists in SHA256SUMS. It commits and pushes nothing, and needs no token.
 //
 // The folder holds the files at their repository paths, and paths.txt: one `<sha256>  <path>` line per file, sorted, so
 // the commit job can tell that it received exactly what was built. Refuses: a dirty tree, a head other than --sha, a
@@ -22,7 +29,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { driftReport, reportLines } from "./check-drift.mjs"
 import { MANIFEST_PATH, manifestProblems } from "./native-manifest.mjs"
-import { allowedPath, packageProblems, releasePackageText } from "./release-rules.mjs"
+import { allowedPath, CONFORMANCE_ASSET, CONFORMANCE_REPORT, conformanceReportProblems, conformanceSetupProblems, declaresSources, packageProblems, releasePackageText } from "./release-rules.mjs"
 import { tagFor, versionProblem } from "./release-version.mjs"
 
 /** The workflow whose presence makes a plugin native. */
@@ -68,7 +75,38 @@ function parseArgs(argv) {
   return options
 }
 
+/** The conformance job: the repository's npm run conformance on the parent, and its report, checked, in --out. */
+function conformance(argv) {
+  const options = parseArgs(argv)
+  const out = resolve(options.out)
+  const root = git(["rev-parse", "--show-toplevel"])
+  process.chdir(root)
+  if (git(["status", "--porcelain", "--untracked-files=all"])) die("the tree is not clean")
+  if (git(["rev-parse", "HEAD"]) !== options.sha) die(`the checkout is not ${options.sha.slice(0, 12)}`)
+  const pkgText = readFileSync(join(root, "package.json"), "utf8")
+  const packageRefusals = packageProblems(pkgText)
+  if (packageRefusals.length) die(packageRefusals.join("; "))
+  const pkg = JSON.parse(pkgText)
+  if (!declaresSources(pkg)) die("package.json declares no sources: a plugin without sources has no conformance report")
+  const setup = conformanceSetupProblems(pkg)
+  if (setup.length) die(setup.join("; "))
+  if (existsSync(out) && readdirSync(out).length) die(`${options.out} is not empty`)
+  if (existsSync(join(root, CONFORMANCE_REPORT))) die(`${CONFORMANCE_REPORT} is already in the checkout: the report must be the one this run writes`)
+  npm(["ci", "--ignore-scripts"])
+  const run = spawnSync("npm", ["run", "conformance"], { stdio: "inherit" })
+  if (run.status !== 0) die(`npm run conformance failed (exit ${run.status}): the source contract's conformance kit refuses this release`)
+  const path = join(root, CONFORMANCE_REPORT)
+  if (!existsSync(path) || !lstatSync(path).isFile()) die(`npm run conformance wrote no ${CONFORMANCE_REPORT}`)
+  const text = readFileSync(path, "utf8")
+  const problems = conformanceReportProblems(text, pkg)
+  if (problems.length) die(problems.join("; "))
+  mkdirSync(out, { recursive: true })
+  writeFileSync(join(out, CONFORMANCE_ASSET), text)
+  console.log(`conformance: ${CONFORMANCE_REPORT} is ok for ${pkg.name} ${pkg.version} on ${options.sha.slice(0, 12)}; written to ${options.out}/${CONFORMANCE_ASSET}`)
+}
+
 function main() {
+  if (process.argv[2] === "conformance") return conformance(process.argv.slice(3))
   const options = parseArgs(process.argv.slice(2))
   const out = resolve(options.out)
   const root = git(["rev-parse", "--show-toplevel"])

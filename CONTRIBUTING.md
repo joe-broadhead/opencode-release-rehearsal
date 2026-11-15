@@ -78,14 +78,21 @@ more than 14 days old, unless `provenance.json` holds the owner's written waiver
 with no capture yet, or only a names-only one, releases with a warning on the run; one that serves only its own tools
 says so with `"upstream": "none"` in the registry.
 
+A plugin that declares sources (a top-level `sources` key in `package.json`, the source contract's declaration) releases
+with its conformance report. Its `npm run conformance` runs the source contract's conformance kit and writes
+`reports/conformance-report.json` (keep `reports/` out of git); `npm run check` runs it too. The release runs it again on
+the parent in its own `conformance` job, which has no write token, and stops unless the run passes and the report's `ok`
+is `true` for this version. The report becomes the Release asset `conformance-report.json`, listed in `SHA256SUMS`. A
+plugin without `sources` has no report, and its release is unchanged.
+
 Before the approval, the workflow:
 - **plans:** refuses a run that is not on `master`, a sha that is not `master`'s head, a sha without a successful
   `ci.yml` push run with a successful job on every runner its push matrix names (macOS included), a `ci.yml` whose
   matrix runs macOS on a pull request or not on a push (the kit tests check it too), a version that is not `x.y.z`, a
   `package.json` that is not `"private": true` or not in its canonical form, a CHANGELOG whose newest release is not
-  this version, a release that does not move forward from the last published Release, a leftover `release/v<version>`
-  branch, a native run that did not build this sha on `master`, by hand, with success, and a missing `native_run` (or
-  one given to a plugin that is not native);
+  this version, a plugin that declares sources with no `conformance` script, a release that does not move forward from
+  the last published Release, a leftover `release/v<version>` branch, a native run that did not build this sha on
+  `master`, by hand, with success, and a missing `native_run` (or one given to a plugin that is not native);
 - **builds**: refuses a failing tool drift check (`scripts/check-drift.mjs --release`, above), then builds `dist/` with
   `npm ci --ignore-scripts` and `npm run build`, with a read-only token, and writes the release files: `dist/`,
   `package.json` without its lifecycle scripts, and the vetted native manifest;
@@ -97,8 +104,10 @@ Before the approval, the workflow:
   independent build of the parent (its own job) equal to the committed `dist/` byte for byte;
 - **installs** the release commit with `plugin add` on each stock OpenCode host (2.2.3 to 2.2.6);
 - **packs** the commit before installing anything and keeps that tarball, then runs the pack stage against a copy;
-- **stages** the Release: verifies the attested native files, writes `SHA256SUMS` and the notes (the version's CHANGELOG
-  section), and shows them all in the run summary with the sha256 of `SHA256SUMS`.
+- **runs the conformance kit** on the parent, for a plugin that declares sources (above), and keeps its report;
+- **stages** the Release: verifies the attested native files, adds the conformance report of a plugin that declares
+  sources, writes `SHA256SUMS` and the notes (the version's CHANGELOG section), and shows them all in the run summary
+  with the sha256 of `SHA256SUMS`.
 
 A job either runs repository or dependency code (`npm ci`, the build, the pack stage, a host install) and has no write
 token, or uses the API and runs only the kit's scripts on a fresh checkout, after checking that the release commit's

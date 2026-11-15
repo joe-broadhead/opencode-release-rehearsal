@@ -59,6 +59,7 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       hosts: ${{ steps.plan.outputs.hosts }}
       native: ${{ steps.plan.outputs.native }}
+      sources: ${{ steps.plan.outputs.sources }}
       mode: ${{ steps.plan.outputs.mode }}
       commit: ${{ steps.plan.outputs.commit }}
       ci_run: ${{ steps.plan.outputs.ci_run }}
@@ -224,6 +225,45 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
 
+  # A plugin that declares sources (package.json `sources`) only: the source contract's conformance kit, run on the parent
+  # by the repository's own `npm run conformance`. A failing run, or a report that is not ok, stops the release before
+  # anything is staged. The report becomes a Release asset, listed in SHA256SUMS. No write token.
+  conformance:
+    name: conformance report
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.sources == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      report_artifact: ${{ steps.report.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+          token: '' # no token: this job runs repository code
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the Bun that every stock OpenCode host in TESTED_HOSTS bundles; a repo's script may run bun
+          no-cache: true
+          token: '' # no token: this job runs repository code
+      - name: Run the conformance kit on the parent, and keep its report
+        run: node scripts/release-commit.mjs conformance --sha "$PARENT" --out "$RUNNER_TEMP/conformance"
+      - id: report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-report
+          path: ${{ runner.temp }}/conformance
+          if-no-files-found: error
+
   # A fresh checkout of the release commit: its identity (GitHub API), one parent on master, the allowed change, no
   # lifecycle scripts, the native manifest, and dist/ byte for byte equal to the independent rebuild. Kit scripts only.
   verify:
@@ -364,8 +404,8 @@ jobs:
   # SHA256SUMS and the notes, all shown in the run summary. Kit scripts only, on a fresh checkout.
   stage:
     name: stage the Release files
-    needs: [plan, commit, hosts, pack]
-    if: ${{ !cancelled() && needs.hosts.result == 'success' && needs.pack.result == 'success' }}
+    needs: [plan, commit, hosts, pack, conformance]
+    if: ${{ !cancelled() && needs.hosts.result == 'success' && needs.pack.result == 'success' && (needs.plan.outputs.sources != 'true' || needs.conformance.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -417,6 +457,19 @@ jobs:
         run: node scripts/attach-native.mjs --out "$RUNNER_TEMP/assets/release/native"
         env:
           GH_TOKEN: ${{ github.token }}
+      # A plugin that declares sources only: the conformance job's report, by the id that job gave, beside SHA256SUMS.
+      - name: Refuse an empty artifact id
+        if: needs.plan.outputs.sources == 'true'
+        env:
+          ARTIFACT_ID: ${{ needs.conformance.outputs.report_artifact }}
+        run: case "$ARTIFACT_ID" in ''|*[!0-9]*) echo "::error::the job before named no artifact"; exit 1 ;; esac
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.sources == 'true'
+        with:
+          artifact-ids: ${{ needs.conformance.outputs.report_artifact }}
+          path: ${{ runner.temp }}/assets/release
+      - name: Check the conformance report against the release commit's sources
+        run: node scripts/release-github.mjs conformance --dir "$RUNNER_TEMP/assets/release" --commit "$COMMIT"
       - id: sums
         name: Write SHA256SUMS, and its own sha256 for the approver
         run: |
@@ -523,6 +576,8 @@ jobs:
       # native file is checked against the release commit's own manifest, executables decompressed.
       - name: Check every native file against the release commit's manifest/native.json
         run: node scripts/release-github.mjs native --dir "$RUNNER_TEMP/assets/release" --commit "$COMMIT"
+      - name: Check the conformance report against the release commit's sources
+        run: node scripts/release-github.mjs conformance --dir "$RUNNER_TEMP/assets/release" --commit "$COMMIT"
       - name: Check again, then create the tag on the release commit (or reuse the kit's tag there)
         env:
           GH_TOKEN: ${{ github.token }}

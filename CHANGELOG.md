@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] - 2026-11-15
+
+### Changed
+
+- Release kit revision `10ff549` (r4). A plugin that declares sources (a top-level `sources` key in `package.json`)
+  releases with its conformance report: its `npm run conformance` writes `reports/conformance-report.json`, the release
+  runs it on the parent in its own `conformance` job, stops unless the report is ok for this version, and attaches it as
+  `conformance-report.json`, listed in `SHA256SUMS`. This rehearsal declares a minimal fixture `sources` key, and its
+  `npm run conformance` writes a fixture report marked as one, to exercise that path.
+- `docs/jelly.md` carries jelly's shared block, word for word (`scripts/jelly-family-block.md`); this rehearsal has no
+  Jelly declaration and no `docs/jelly.md`, so the drift check has nothing to check.
+
 ## [0.0.3] - 2026-11-14
 
 ### Changed

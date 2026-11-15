@@ -6,7 +6,8 @@
 //           it (the master push run of ci.yml, with a successful job on every runner its push matrix names, macOS too;
 //           a pull request's run, Linux only, never counts), a version or CHANGELOG not ready, a leftover release branch, a release that does not move forward, a
 //           native run that is wrong, or one given to a plugin that is not native. Finds a tag left by a run that failed
-//           after tagging (mode resume). Writes version, tag, hosts, native, mode, commit, ci_run and manifest_sha256 (the
+//           after tagging (mode resume). A plugin that declares sources needs an npm "conformance" script. Writes version,
+//           tag, hosts, native, sources (true when package.json declares sources), mode, commit, ci_run and manifest_sha256 (the
 //           vetted native manifest's, which the commit job requires byte for byte) to GITHUB_OUTPUT.
 //   commit  --files <dir> --parent <P> --tag <tag> --native <true|false> [--manifest-sha256 <the plan's>]
 //           Makes the release commit on the temporary branch release/<tag>, with GraphQL createCommitOnBranch and the
@@ -21,6 +22,9 @@
 //   native  --dir <dir> --commit <C>
 //           Checks the staged Release files against C's manifest/native.json: each native file's size and sha256, each
 //           gzip's executable, nothing unpinned, nothing missing, and only SHA256SUMS and one tarball besides.
+//   conformance --dir <dir> --commit <C>
+//           Checks the staged conformance report against C's package.json: present, once, ok and for C's version when it
+//           declares sources; absent when it does not.
 //   sums    --dir <dir> --sums-sha256 <digest>
 //           Checks that the staged SHA256SUMS has the digest the approver saw in the run summary, and every staged
 //           Release file against it.
@@ -44,6 +48,10 @@ import {
   ciJobsProblems,
   ciMatrix,
   COMMIT_MUTATION,
+  CONFORMANCE_ASSET,
+  conformanceReportProblems,
+  conformanceSetupProblems,
+  declaresSources,
   commitIdentityProblems,
   fetchReleases,
   ghOutput,
@@ -116,6 +124,8 @@ export function plan({ sha, nativeRun, manifestOut, env, gh, cwd }) {
   if (versionRefusal) refuse(versionRefusal)
   const tag = tagFor(pkg.version)
   if (!pkg.scripts?.build) refuse('package.json has no "build" script: the release builds with npm run build')
+  const conformanceRefusals = conformanceSetupProblems(pkg)
+  if (conformanceRefusals.length) refuse(conformanceRefusals.join("; "))
   const changelogPath = join(cwd, "CHANGELOG.md")
   if (!existsSync(changelogPath)) refuse("there is no CHANGELOG.md: the release notes come from it")
   const changelog = changelogProblems(readFileSync(changelogPath, "utf8"), pkg.version)
@@ -207,7 +217,7 @@ export function plan({ sha, nativeRun, manifestOut, env, gh, cwd }) {
   } catch (error) {
     refuse(error.message)
   }
-  return { version: pkg.version, tag, hosts: JSON.stringify(hosts), native: String(native), mode, commit, ci_run: String(ci.run.id), previous: order.previous ?? "", manifest_sha256: manifestText ? sha256(manifestText) : "" }
+  return { version: pkg.version, tag, hosts: JSON.stringify(hosts), native: String(native), sources: String(declaresSources(pkg)), mode, commit, ci_run: String(ci.run.id), previous: order.previous ?? "", manifest_sha256: manifestText ? sha256(manifestText) : "" }
 }
 
 /** Every file under a folder, as repository paths, refusing anything that is not a regular file or a folder. */
@@ -443,12 +453,12 @@ export function sumsProblems(dir, { sumsSha256 } = {}) {
  * undefined for a plugin that is not native). The publish job runs it after the approval, where no repository or
  * dependency code has run: every file under native/ is one the manifest pins, with its size and sha256, every gzip
  * decompresses to the executable the manifest pins (size and sha256), every pinned file is there, and outside native/
- * there is only SHA256SUMS and one tarball.
+ * there is only SHA256SUMS and one tarball (and the conformance report, which conformanceAssetProblems checks).
  */
 export function nativeAssetProblems({ dir, manifest }) {
   const problems = []
   const files = walkFiles(dir)
-  const outside = files.filter((path) => !path.startsWith("native/") && path !== "SHA256SUMS")
+  const outside = files.filter((path) => !path.startsWith("native/") && path !== "SHA256SUMS" && path !== CONFORMANCE_ASSET)
   if (outside.length !== 1 || !/^[^/]+\.tgz$/.test(outside[0])) problems.push(`outside native/ the staged files must be SHA256SUMS and one tarball, and they are ${outside.join(", ") || "none"}`)
   const native = files.filter((path) => path.startsWith("native/"))
   if (!manifest) {
@@ -485,6 +495,18 @@ export function nativeAssetProblems({ dir, manifest }) {
     }
   }
   return problems
+}
+
+/**
+ * The staged conformance report against the release commit's package.json: a plugin that declares sources has the
+ * report, named CONFORMANCE_ASSET at the top of the staged folder, ok and for this package's version; a plugin without
+ * sources has none. The stage job runs it before SHA256SUMS is written, and the publish job again after the approval.
+ */
+export function conformanceAssetProblems({ dir, pkg }) {
+  const staged = walkFiles(dir).filter((path) => path.split("/").pop() === CONFORMANCE_ASSET)
+  if (!declaresSources(pkg)) return staged.length ? [`a conformance report is staged (${staged.join(", ")}), and the release commit's package.json declares no sources`] : []
+  if (staged.length !== 1 || staged[0] !== CONFORMANCE_ASSET) return [`the release commit's package.json declares sources, and the staged files hold ${staged.length ? staged.join(", ") : "no conformance report"}: it must be ${CONFORMANCE_ASSET}, once, beside SHA256SUMS`]
+  return conformanceReportProblems(readFileSync(join(dir, CONFORMANCE_ASSET), "utf8"), pkg)
 }
 
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -539,7 +561,13 @@ function main(argv) {
     const problems = nativeAssetProblems({ dir: flags.dir, manifest })
     if (problems.length) refuse(`the staged Release files are not the ones the release commit pins: ${problems.join("; ")}`)
     console.log(manifest ? `native: every staged native file is the one ${MANIFEST_PATH} pins, executables included` : "native: no native files, as the release commit has no manifest")
-  } else refuse(`unknown command ${command ?? "(none)"}: plan, commit, tag, cleanup, sums or native`)
+  } else if (command === "conformance") {
+    if (!SHA1.test(flags.commit ?? "")) refuse("--commit must be the release commit's full sha")
+    const pkg = JSON.parse(gitIn(cwd, ["show", `${flags.commit}:package.json`]))
+    const problems = conformanceAssetProblems({ dir: flags.dir, pkg })
+    if (problems.length) refuse(`the staged conformance report is not releasable: ${problems.join("; ")}`)
+    console.log(declaresSources(pkg) ? `conformance: ${CONFORMANCE_ASSET} is staged, ok, for ${pkg.name} ${pkg.version}` : "conformance: no sources, and no report, as the release commit declares none")
+  } else refuse(`unknown command ${command ?? "(none)"}: plan, commit, tag, cleanup, sums, native or conformance`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

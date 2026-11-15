@@ -167,6 +167,46 @@ export function fetchReleases(repository, gh) {
   }
 }
 
+/**
+ * A plugin that declares sources (a top-level `sources` key in package.json, the source contract's declaration) releases
+ * with its conformance report: the repository's own `npm run conformance` runs the source contract's conformance kit and
+ * writes this file, which the release attaches next to SHA256SUMS. A plugin without `sources` has no report.
+ */
+export const CONFORMANCE_REPORT = "reports/conformance-report.json"
+/** The report's name as a Release asset, and in SHA256SUMS. */
+export const CONFORMANCE_ASSET = "conformance-report.json"
+
+/** True when package.json declares sources. */
+export const declaresSources = (pkg) => pkg !== null && typeof pkg === "object" && Object.hasOwn(pkg, "sources") && pkg.sources !== undefined
+
+/** Why a plugin that declares sources cannot release its conformance report (none for a plugin without sources). */
+export function conformanceSetupProblems(pkg) {
+  if (!declaresSources(pkg)) return []
+  if (typeof pkg.scripts?.conformance !== "string" || !pkg.scripts.conformance.trim()) {
+    return [`package.json declares sources and has no "conformance" script: add one that runs the source contract's conformance kit and writes ${CONFORMANCE_REPORT}`]
+  }
+  return []
+}
+
+/**
+ * Why a conformance report cannot be released with this package: it is not one JSON object, its `ok` is not true, or it
+ * names another plugin or version. The kit reads only these three keys; the rest is the source contract's.
+ */
+export function conformanceReportProblems(text, pkg) {
+  let report
+  try {
+    report = JSON.parse(text)
+  } catch {
+    return [`${CONFORMANCE_REPORT} does not parse as JSON`]
+  }
+  if (report === null || typeof report !== "object" || Array.isArray(report)) return [`${CONFORMANCE_REPORT} is not a JSON object`]
+  const problems = []
+  if (report.ok !== true) problems.push(`the conformance report is not ok (ok: ${JSON.stringify(report.ok)}): the source contract's conformance kit failed`)
+  if (report.version !== pkg.version) problems.push(`the conformance report is for version ${JSON.stringify(report.version)}, not ${pkg.version}`)
+  if (report.plugin !== undefined && report.plugin !== pkg.name) problems.push(`the conformance report is for ${JSON.stringify(report.plugin)}, not ${pkg.name}`)
+  return problems
+}
+
 /** A macOS runner label. */
 export const MACOS = /^macos-/
 

@@ -9,7 +9,7 @@
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { dirname, join } from "node:path"
@@ -20,13 +20,17 @@ import { FIXTURE_SCHEMA, toolsDigest } from "./check-drift.mjs"
 import "./drift-kit.test.mjs"
 import { publish } from "./publish-release.mjs"
 import { pathsText } from "./release-commit.mjs"
-import { cleanup, commit, MAX_FILE, MAX_PAYLOAD, nativeAssetProblems, plan, releaseFiles, sumsProblems, tagRelease } from "./release-github.mjs"
+import { cleanup, commit, conformanceAssetProblems, MAX_FILE, MAX_PAYLOAD, nativeAssetProblems, plan, releaseFiles, sumsProblems, tagRelease } from "./release-github.mjs"
 import {
   ACTIONS_BOT,
   allowedPath,
   ciJobsProblems,
   ciMatrix,
   COMMIT_MUTATION,
+  CONFORMANCE_ASSET,
+  CONFORMANCE_REPORT,
+  conformanceReportProblems,
+  conformanceSetupProblems,
   commitIdentityProblems,
   fetchReleases,
   forbiddenCall,
@@ -318,7 +322,7 @@ function repository(files, { releases = [] } = {}) {
   const bin = folder()
   writeFileSync(join(home, ".gitconfig"), "")
   writeFileSync(join(bin, "gh"), FAKE_GH, { mode: 0o755 })
-  writeFileSync(join(bin, "npm"), '#!/bin/sh\ncase "$1 $2" in "ci --ignore-scripts") exit 0 ;; "run build") exec node build.mjs ;; esac\necho "fake npm: $*" >&2\nexit 1\n', { mode: 0o755 })
+  writeFileSync(join(bin, "npm"), '#!/bin/sh\ncase "$1 $2" in "ci --ignore-scripts") exit 0 ;; "run build") exec node build.mjs ;; "run conformance") exec node conformance.mjs ;; esac\necho "fake npm: $*" >&2\nexit 1\n', { mode: 0o755 })
   const releasesFile = join(home, "releases.json")
   const routesFile = join(home, "routes.json")
   const env = {
@@ -912,6 +916,24 @@ const pluginSource = (version, { native = false, changelog = TWO } = {}) => ({
   ...(native ? { ".github/workflows/native.yml": "name: native\n" } : {}),
 })
 
+/**
+ * A plugin that declares sources, with an `npm run conformance` (conformance.mjs) that writes the report: `report`
+ * changes what it writes, `exit` its exit code, `write: false` writes nothing, and `script: null` leaves no npm script.
+ */
+const SOURCES = { contractVersion: 1, rpc: "kit-test.tools", items: [] }
+const sourcesSource = (version, { report = {}, exit = 0, write = true, script = "node conformance.mjs" } = {}) => {
+  const base = pluginSource(version)
+  const pkg = { ...JSON.parse(base["package.json"]), sources: SOURCES }
+  if (script !== null) pkg.scripts = { ...pkg.scripts, conformance: script }
+  const body = { plugin: "@owner/kit-test", version, contract: "source-contract 0.1.0", ok: true, sources: [], ...report }
+  return {
+    ...base,
+    ".gitignore": "dist/\nnode_modules/\nreports/\n",
+    "package.json": serialise(pkg),
+    "conformance.mjs": `import { mkdirSync, writeFileSync } from "node:fs"\n${write ? `mkdirSync("reports", { recursive: true })\nwriteFileSync("reports/conformance-report.json", ${JSON.stringify(`${JSON.stringify(body, null, 2)}\n`)})\n` : ""}process.exit(${exit})\n`,
+  }
+}
+
 /** A manifest the native run would write for the release of `tag` on `commit`. */
 const nativeManifest = ({ tag, commit, run = 77 }) => ({
   schema: 1,
@@ -1034,7 +1056,18 @@ describe("release-github.mjs plan", () => {
 
   test("plans a new release: the version, the tag, the hosts, the CI run", () => {
     const { run } = setup()
-    assert.deepEqual(run(), { version: "0.0.1", tag: "v0.0.1", hosts: '["9.8.1","9.8.4"]', native: "false", mode: "new", commit: "", ci_run: "501", previous: "", manifest_sha256: "" })
+    assert.deepEqual(run(), { version: "0.0.1", tag: "v0.0.1", hosts: '["9.8.1","9.8.4"]', native: "false", sources: "false", mode: "new", commit: "", ci_run: "501", previous: "", manifest_sha256: "" })
+  })
+
+  test("a plugin that declares sources plans with sources true, and is refused without an npm conformance script, before GitHub is read", () => {
+    const withScript = repository(sourcesSource("0.0.1"))
+    const github = fakeGitHub(withScript)
+    github.state.ciRuns = [ciRun(withScript.head)]
+    assert.equal(plan({ sha: withScript.head, env: ENV(withScript), gh: github.gh, cwd: withScript.dir }).sources, "true")
+    const without = repository(sourcesSource("0.0.1", { script: null }))
+    const quiet = fakeGitHub(without)
+    assert.throws(() => plan({ sha: without.head, env: ENV(without), gh: quiet.gh, cwd: without.dir }), /package\.json declares sources and has no "conformance" script: add one that runs the source contract's conformance kit and writes reports\/conformance-report\.json/)
+    assert.deepEqual(quiet.calls, [], "the planner read nothing from GitHub")
   })
 
   test("refuses a run that is not on master, or a sha that is not the run's", () => {
@@ -1680,8 +1713,8 @@ describe("the release workflow's shape", () => {
     assert.match(text, /^ {2}cancel-in-progress: false$/m)
   })
 
-  test("has the eight jobs, and only publish uses the release environment", () => {
-    assert.deepEqual(Object.keys(jobs), ["plan", "build", "commit", "rebuild", "verify", "hosts", "pack", "stage", "publish", "cleanup"])
+  test("has the eleven jobs, and only publish uses the release environment", () => {
+    assert.deepEqual(Object.keys(jobs), ["plan", "build", "commit", "rebuild", "conformance", "verify", "hosts", "pack", "stage", "publish", "cleanup"])
     for (const [name, body] of Object.entries(jobs)) assert.equal(/environment:/.test(body), name === "publish", name)
     assert.match(jobs.publish, /^ {4}environment: release$/m)
   })
@@ -1714,7 +1747,7 @@ describe("the release workflow's shape", () => {
 
   test("a job either runs repository or dependency code or holds a token, never both", () => {
     const dependencyJobs = Object.keys(jobs).filter((job) => steps(job).some(runsDependencies))
-    assert.deepEqual(dependencyJobs, ["build", "rebuild", "hosts", "pack"])
+    assert.deepEqual(dependencyJobs, ["build", "rebuild", "conformance", "hosts", "pack"])
     for (const job of dependencyJobs) assert.doesNotMatch(jobs[job], /GH_TOKEN|github\.token|secrets\./, job)
     for (const job of Object.keys(jobs).filter((name) => !dependencyJobs.includes(name))) {
       assert.match(jobs[job], /persist-credentials: false/, job)
@@ -1933,6 +1966,108 @@ describe("CI: macOS on pushes to master and for releases, never on pull requests
   })
 })
 
+describe("the conformance report of a plugin that declares sources", () => {
+  const pkg = { name: "@owner/kit-test", version: "0.0.1" }
+  const report = (extra = {}) => `${JSON.stringify({ plugin: pkg.name, version: pkg.version, ok: true, sources: [], ...extra })}\n`
+
+  test("rules: a plugin with sources needs npm run conformance; a report must be ok, for this plugin and version", () => {
+    assert.deepEqual(conformanceSetupProblems({ ...pkg, scripts: {} }), [])
+    assert.deepEqual(conformanceSetupProblems({ ...pkg, sources: SOURCES, scripts: { conformance: "bun scripts/conformance.ts" } }), [])
+    assert.match(conformanceSetupProblems({ ...pkg, sources: SOURCES, scripts: { conformance: " " } }).join(), /has no "conformance" script/)
+    assert.deepEqual(conformanceReportProblems(report(), pkg), [])
+    assert.deepEqual(conformanceReportProblems(report({ plugin: undefined }), pkg), [], "the plugin's name is optional; when it is there it must match")
+    assert.match(conformanceReportProblems(report({ ok: false }), pkg).join(), /the conformance report is not ok \(ok: false\)/)
+    assert.match(conformanceReportProblems(report({ ok: "true" }), pkg).join(), /not ok/)
+    assert.match(conformanceReportProblems(report({ version: "0.0.0" }), pkg).join(), /is for version "0\.0\.0", not 0\.0\.1/)
+    assert.match(conformanceReportProblems(report({ plugin: "@owner/other" }), pkg).join(), /is for "@owner\/other", not @owner\/kit-test/)
+    assert.deepEqual(conformanceReportProblems("{", pkg), [`${CONFORMANCE_REPORT} does not parse as JSON`])
+    assert.deepEqual(conformanceReportProblems("[]", pkg), [`${CONFORMANCE_REPORT} is not a JSON object`])
+  })
+
+  describe("release-commit.mjs conformance: the conformance job", () => {
+    const run = (repo, extra = []) => {
+      const out = join(folder(), "conformance")
+      return { out, result: repo.node("release-commit.mjs", ["conformance", "--sha", repo.head, "--out", out, ...extra]) }
+    }
+
+    test("runs npm run conformance on the parent and keeps the report, as the asset the stage job lists", () => {
+      const repo = repository(sourcesSource("0.0.1"))
+      const { out, result } = run(repo)
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /conformance: reports\/conformance-report\.json is ok for @owner\/kit-test 0\.0\.1/)
+      assert.deepEqual(readdirSync(out), [CONFORMANCE_ASSET])
+      assert.equal(JSON.parse(readFileSync(join(out, CONFORMANCE_ASSET), "utf8")).ok, true)
+      assert.equal(repo.git("rev-parse", "HEAD"), repo.head, "nothing is committed")
+    })
+
+    test("refuses a failing run, a missing report, a report that is not ok or names another version, and a plugin without sources", () => {
+      assert.match(run(repository(sourcesSource("0.0.1", { exit: 1 }))).result.stderr, /npm run conformance failed \(exit 1\): the source contract's conformance kit refuses this release/)
+      assert.match(run(repository(sourcesSource("0.0.1", { write: false }))).result.stderr, /npm run conformance wrote no reports\/conformance-report\.json/)
+      assert.match(run(repository(sourcesSource("0.0.1", { report: { ok: false } }))).result.stderr, /the conformance report is not ok/)
+      assert.match(run(repository(sourcesSource("0.0.1", { report: { version: "0.0.0" } }))).result.stderr, /is for version "0\.0\.0", not 0\.0\.1/)
+      assert.match(run(repository(pluginSource("0.0.1"))).result.stderr, /package\.json declares no sources: a plugin without sources has no conformance report/)
+      assert.match(run(repository(sourcesSource("0.0.1", { script: null }))).result.stderr, /has no "conformance" script/)
+      const committed = repository({ ...sourcesSource("0.0.1"), ".gitignore": "dist/\nnode_modules/\n", "reports/conformance-report.json": report() })
+      assert.match(run(committed).result.stderr, /reports\/conformance-report\.json is already in the checkout/)
+      for (const bad of [run(repository(sourcesSource("0.0.1", { exit: 1 }))).out]) assert.equal(existsSync(bad), false, "nothing is kept from a refused run")
+    })
+  })
+
+  describe("release-github.mjs conformance: the staged report against the release commit", () => {
+    const staged = (files) => {
+      const dir = folder()
+      writeTree(dir, { SHA256SUMS: "x\n", "kit-test-0.0.1.tgz": "t", ...files })
+      return dir
+    }
+    const withSources = { ...pkg, sources: SOURCES }
+
+    test("a plugin with sources stages its report, once, beside SHA256SUMS; a plugin without sources stages none", () => {
+      assert.deepEqual(conformanceAssetProblems({ dir: staged({ [CONFORMANCE_ASSET]: report() }), pkg: withSources }), [])
+      assert.deepEqual(conformanceAssetProblems({ dir: staged({}), pkg }), [])
+      assert.match(conformanceAssetProblems({ dir: staged({}), pkg: withSources }).join(), /declares sources, and the staged files hold no conformance report/)
+      assert.match(conformanceAssetProblems({ dir: staged({ [`native/${CONFORMANCE_ASSET}`]: report() }), pkg: withSources }).join(), /hold native\/conformance-report\.json: it must be conformance-report\.json, once, beside SHA256SUMS/)
+      assert.match(conformanceAssetProblems({ dir: staged({ [CONFORMANCE_ASSET]: report() }), pkg }).join(), /a conformance report is staged \(conformance-report\.json\), and the release commit's package\.json declares no sources/)
+      assert.match(conformanceAssetProblems({ dir: staged({ [CONFORMANCE_ASSET]: report({ ok: false }) }), pkg: withSources }).join(), /not ok/)
+    })
+
+    test("the native check leaves the report to this check, and still refuses anything else outside native/", () => {
+      assert.deepEqual(nativeAssetProblems({ dir: staged({ [CONFORMANCE_ASSET]: report() }), manifest: undefined }), [])
+      assert.match(nativeAssetProblems({ dir: staged({ "notes.txt": "x" }), manifest: undefined }).join(), /must be SHA256SUMS and one tarball/)
+    })
+
+    test("the CLI reads the release commit's package.json", () => {
+      const repo = repository(sourcesSource("0.0.1"))
+      const cli = (dir) => repo.node("release-github.mjs", ["conformance", "--dir", dir, "--commit", repo.head])
+      const ok = cli(staged({ [CONFORMANCE_ASSET]: report() }))
+      assert.equal(ok.status, 0, ok.stderr)
+      assert.match(ok.stdout, /conformance: conformance-report\.json is staged, ok, for @owner\/kit-test 0\.0\.1/)
+      assert.match(cli(staged({})).stderr, /release-github: the staged conformance report is not releasable: the release commit's package\.json declares sources/)
+      const plain = repository(pluginSource("0.0.1"))
+      assert.match(plain.node("release-github.mjs", ["conformance", "--dir", staged({}), "--commit", plain.head]).stdout, /conformance: no sources, and no report/)
+    })
+  })
+
+  test("the workflow: the conformance job runs for sources only, with no token; stage lists its report and publish checks it again", () => {
+    const text = readFileSync(join(SCRIPTS, "..", ".github", "workflows", "release.yml"), "utf8")
+    const job = (name) => new RegExp(`^ {2}${name}:\\n[\\s\\S]*?(?=^ {2}[\\w-]+:$|(?![\\s\\S]))`, "m").exec(text)?.[0] ?? ""
+    const conformance = job("conformance")
+    assert.match(conformance, /if: \$\{\{ !cancelled\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.sources == 'true' \}\}/)
+    assert.match(conformance, /permissions:\n {6}contents: read\n/)
+    assert.match(conformance, /run: node scripts\/release-commit\.mjs conformance --sha "\$PARENT" --out "\$RUNNER_TEMP\/conformance"/)
+    assert.match(job("plan"), /sources: \$\{\{ steps\.plan\.outputs\.sources \}\}/)
+    const stage = job("stage")
+    assert.match(stage, /needs: \[plan, commit, hosts, pack, conformance\]/)
+    assert.match(stage, /needs\.plan\.outputs\.sources != 'true' \|\| needs\.conformance\.result == 'success'/)
+    assert.match(stage, /artifact-ids: \$\{\{ needs\.conformance\.outputs\.report_artifact \}\}\n {10}path: \$\{\{ runner\.temp \}\}\/assets\/release/)
+    assert.ok(stage.indexOf("release-github.mjs conformance") < stage.indexOf("Write SHA256SUMS"), "the report is checked, then listed in SHA256SUMS")
+    assert.match(job("publish"), /node scripts\/release-github\.mjs conformance --dir "\$RUNNER_TEMP\/assets\/release" --commit "\$COMMIT"/)
+  })
+
+  test("this repository: when it declares sources, it has npm run conformance (npm run check)", () => {
+    assert.deepEqual(conformanceSetupProblems(JSON.parse(readFileSync(join(SCRIPTS, "..", "package.json"), "utf8"))), [])
+  })
+})
+
 // The kit is one version in every plugin. check-copies.mjs, the family's check of shared copies, pins each of its files whole,
 // so a plugin whose kit differs from the family's fails `npm run check`.
 describe("the kit's own files: pinned in check-copies.mjs", () => {
@@ -1944,6 +2079,7 @@ describe("the kit's own files: pinned in check-copies.mjs", () => {
     "scripts/check-release-plugin-add.sh",
     "scripts/check-release-shape.mjs",
     "scripts/drift-kit.test.mjs",
+    "scripts/jelly-family-block.md",
     "scripts/native-manifest.mjs",
     "scripts/publish-release.mjs",
     "scripts/release-commit.mjs",
