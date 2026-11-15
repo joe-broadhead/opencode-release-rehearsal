@@ -314,6 +314,65 @@ describe("check-drift: jelly's shared block in docs/jelly.md", () => {
   })
 })
 
+// The declaration test kit, test/support/jelly-kit.ts (a family copy, pinned in check-copies.mjs), knows Jelly's optional
+// top-level `cost` (1 to 300 characters) and `admin` (1 to 200), as hey-jelly's PluginDeclarationSchema declares them
+// (protocol/contracts/src/plugin-contract.ts, `z.string().trim().min(1).max(n)`). Node imports the TypeScript copy as it is.
+describe("jelly-kit.ts: the declaration's cost and admin lines", () => {
+  const KIT = join(SCRIPTS, "..", "test", "support", "jelly-kit.ts")
+  const skip = existsSync(KIT) ? false : "this repository has no test/support/jelly-kit.ts"
+  const load = () => import(KIT)
+
+  test("cost and admin are keys Jelly knows, and optional", { skip }, async () => {
+    const { DECLARATION_KEYS, lineProblems } = await load()
+    assert.ok(DECLARATION_KEYS.includes("cost") && DECLARATION_KEYS.includes("admin"))
+    assert.deepEqual(lineProblems("cost", undefined, 300), [])
+    assert.deepEqual(lineProblems("admin", undefined, 200), [])
+  })
+
+  test("takes one line of 1 to 300 (cost) or 200 (admin) characters, with no space at either end", { skip }, async () => {
+    const { lineProblems } = await load()
+    assert.deepEqual(lineProblems("cost", "Most calls cost money with X; each result says what it cost.", 300), [])
+    assert.deepEqual(lineProblems("cost", "x".repeat(300), 300), [])
+    assert.deepEqual(lineProblems("admin", "turn on MCP Server in Ashby's admin settings", 200), [])
+    assert.deepEqual(lineProblems("admin", "x".repeat(200), 200), [])
+  })
+
+  test("refuses a 301-character cost, a 201-character admin, a line break, padding, an empty line and a non-string", { skip }, async () => {
+    const { lineProblems } = await load()
+    assert.deepEqual(lineProblems("cost", "x".repeat(301), 300), ["jelly.cost is longer than 300 characters"])
+    assert.deepEqual(lineProblems("admin", "x".repeat(201), 200), ["jelly.admin is longer than 200 characters"])
+    for (const broken of ["two\nlines", "two\r\nlines", "two\rlines", "two\u2028lines"]) assert.deepEqual(lineProblems("cost", broken, 300), ["jelly.cost is more than one line"], JSON.stringify(broken))
+    assert.deepEqual(lineProblems("admin", " padded", 200), ["jelly.admin has a space at either end"])
+    assert.deepEqual(lineProblems("admin", "padded ", 200), ["jelly.admin has a space at either end"])
+    assert.deepEqual(lineProblems("cost", "padded\n", 300), ["jelly.cost has a space at either end", "jelly.cost is more than one line"])
+    assert.deepEqual(lineProblems("cost", ` ${"x".repeat(300)}`, 300), ["jelly.cost has a space at either end"], "the length is Jelly's, after trimming")
+    assert.deepEqual(lineProblems("cost", ` ${"x".repeat(301)}`, 300), ["jelly.cost has a space at either end", "jelly.cost is longer than 300 characters"])
+    assert.deepEqual(lineProblems("cost", "", 300), ["jelly.cost is empty"])
+    assert.deepEqual(lineProblems("admin", "   ", 200), ["jelly.admin is empty"])
+    assert.deepEqual(lineProblems("cost", 7, 300), ["jelly.cost is not a string"])
+    assert.deepEqual(lineProblems("cost", null, 300), ["jelly.cost is not a string"])
+  })
+
+  test("declarationProblems checks both lines, and no longer calls them unknown keys", { skip }, async () => {
+    const { declarationProblems } = await load()
+    const root = mkdtempSync(join(tmpdir(), "jelly-kit-lines-"))
+    try {
+      const declare = (lines) => {
+        const jelly = { title: "Kit test", summary: "Kit test's records.", icon: "assets/icon.svg", tools: [{ name: "kit.read", permission: "kit_read", effect: "allow", readOnly: true }], ...lines }
+        writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@joe-broadhead/opencode-kit-test", version: "0.0.1", files: ["assets"], jelly }))
+        mkdirSync(join(root, "assets"), { recursive: true })
+        writeFileSync(join(root, "assets", "icon.svg"), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>')
+        return declarationProblems(new URL(`file://${root}/`), { effectOf: () => "allow" })
+      }
+      assert.deepEqual(declare({ cost: "Each call costs credits with the vendor.", admin: "turn on the vendor's API access" }), [])
+      assert.deepEqual(declare({ cost: "x".repeat(301), admin: " x" }), ["jelly.cost is longer than 300 characters", "jelly.admin has a space at either end"])
+      assert.deepEqual(declare({ costs: "x" }), ["jelly.costs is not a key Jelly knows"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("check-drift: the release gate", () => {
   const pkg = { jelly: { tools: [tool("search")] } }
   const fresh = fixture([served("search", true)], { listedAt: "2026-11-10" })

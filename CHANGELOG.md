@@ -6,11 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
-- Release kit revision `e26aef8` (r4.1). Nothing a plugin's `npm run conformance` writes can replace the release
+- Release kit revision `1f452e5` (r4.1). Nothing a plugin's `npm run conformance` writes can replace the release
   tarball: the conformance job uploads only `conformance-report.json`; the pack job records the kept tarball's sha256
   before any dependency is installed; the stage job takes only the report, into a folder of its own, and checks after
   every download, and publish again after the approval, that the staged tarball has that sha256. A conformance report
   must name the plugin, and is at most 256 KiB.
+- The declaration test kit (`test/support/jelly-kit.ts`) knows Jelly's optional `cost` (1 to 300 characters) and `admin`
+  (1 to 200) lines, and refuses one that is longer, padded, more than one line, empty or not a string.
 
 ## [0.0.4] - 2026-11-15
 

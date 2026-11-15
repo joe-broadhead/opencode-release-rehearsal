@@ -15,6 +15,8 @@ export type Declaration = {
   title?: string
   summary?: string
   icon?: string
+  cost?: string
+  admin?: string
   tools?: DeclaredTool[]
   skills?: string[]
   signIns?: DeclaredSignIn[]
@@ -27,6 +29,8 @@ export const DECLARATION_KEYS = [
   "title",
   "summary",
   "icon",
+  "cost",
+  "admin",
   "tools",
   "skills",
   "rpc",
@@ -96,6 +100,7 @@ export function declarationProblems(root: URL, options: DeclarationOptions): str
   }
   if (!jelly.title?.trim() || jelly.title.length > 60) problems.push("jelly.title must be 1 to 60 characters")
   problems.push(...summaryProblems(jelly.summary))
+  problems.push(...lineProblems("cost", jelly.cost, 300), ...lineProblems("admin", jelly.admin, 200))
   problems.push(...iconProblems(root, pkg))
 
   const shipped = existsSync(new URL("skills", root)) ? readdirSync(new URL("skills", root)).sort() : []
@@ -136,6 +141,23 @@ export function summaryProblems(summary: string | undefined): string[] {
   if (summary.includes("\n")) problems.push("jelly.summary is more than one line")
   if (!summary.endsWith(".")) problems.push("jelly.summary does not end with a full stop")
   if (POLICY.test(summary)) problems.push(`jelly.summary states a policy ("${summary.match(POLICY)?.[0]}"): say what it reaches, and leave what asks to the card`)
+  return problems
+}
+
+/**
+ * An optional line Jelly shows on the plugin's review: `cost` (what it costs with its vendor, at most 300 characters)
+ * or `admin` (the end of "Your admin needs to …", at most 200). Jelly's schema takes a string, trims it, and keeps 1 to
+ * `max` characters (hey-jelly `protocol/contracts/src/plugin-contract.ts`, `cost` and `admin`). The kit also wants one
+ * line with no space at either end, so the text declared is the text Jelly shows.
+ */
+export function lineProblems(key: "cost" | "admin", value: unknown, max: number): string[] {
+  if (value === undefined) return []
+  if (typeof value !== "string") return [`jelly.${key} is not a string`]
+  const problems: string[] = []
+  if (!value.trim()) problems.push(`jelly.${key} is empty`)
+  else if (value !== value.trim()) problems.push(`jelly.${key} has a space at either end`)
+  if (value.trim().length > max) problems.push(`jelly.${key} is longer than ${max} characters`)
+  if (/[\n\r\u2028\u2029]/u.test(value)) problems.push(`jelly.${key} is more than one line`)
   return problems
 }
 
