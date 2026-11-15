@@ -289,6 +289,18 @@ describe("check-drift: jelly's shared block in docs/jelly.md", () => {
     assert.deepEqual(familyContradictions("A tool this plugin does not declare runs at Read only.").map((item) => item.level), ["warn"])
   })
 
+  test("fails a tool declared allow said to run: the family's own wording before the rollout (github, linear, slack)", () => {
+    // github's docs/jelly.md:16-21, linear's :26 and slack's :22 at origin/master on 15 Nov 2026, word for word.
+    const github = "100 tools are declared (62 read-only). Jelly's agents have no base \"allow everything\" rule, so the\nplugin's own default rules, which it puts after that rule, never reach them. Jelly writes each\ndeclared `ask` or `deny` as that tool's default instead (the person's own choice replaces it), and\ndenies a read-only helper every tool not marked `readOnly`. Every tool is declared `allow`, so a\nJelly agent runs what the plugin's own default allows; declare a `deny` or an `ask` here, or set\nthe plugin's `access` option, to restrict one.\n"
+    const found = familyContradictions(github)
+    assert.deepEqual(found.map((item) => [item.level, item.line]), [["fail", 4]])
+    assert.match(found[0].sentence, /^Every tool is declared `allow`, so a Jelly agent runs/)
+    const linearSlack = "- Ask: none. Every tool is declared `allow`, so a Jelly agent runs what the plugin's own default allows.\n- Off: none. To make one ask or stop, declare `ask` or `deny` for it, or set the plugin's `access` option in the agent's options.\n"
+    assert.deepEqual(familyContradictions(linearSlack).map((item) => item.level), ["fail"])
+    assert.deepEqual(familyContradictions("A tool declared allow runs without asking.").map((item) => item.level), ["warn"])
+    assert.deepEqual(familyContradictions("Every tool is declared `allow`, which changes nothing: a Jelly agent runs it as the access level says.").map((item) => item.level), [])
+  })
+
   test("leaves the family's own true sentences, code and the block itself alone", () => {
     for (const sentence of [
       "It falls under `browse_*`, in Jelly's access level and in the plugin's own rules alike: it runs at Allowed, asks at Ask before changes and is denied at Read only.",

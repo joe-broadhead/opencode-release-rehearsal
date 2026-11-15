@@ -75,6 +75,16 @@ function parseArgs(argv) {
   return options
 }
 
+/** Whether anything is at the path, a dangling symlink included. */
+const present = (path) => {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** The conformance job: the repository's npm run conformance on the parent, and its report, checked, in --out. */
 function conformance(argv) {
   const options = parseArgs(argv)
@@ -90,7 +100,9 @@ function conformance(argv) {
   if (!declaresSources(pkg)) die("package.json declares no sources: a plugin without sources has no conformance report")
   const setup = conformanceSetupProblems(pkg)
   if (setup.length) die(setup.join("; "))
-  if (existsSync(out) && readdirSync(out).length) die(`${options.out} is not empty`)
+  // --out is made only after the run, so nothing the run does (the repository's code or its dependencies') can put a file
+  // in it: a folder there after the run is refused. The job uploads only the report, and stage takes only that one file.
+  if (present(out)) die(`${options.out} already exists: the conformance job makes it after the run`)
   if (existsSync(join(root, CONFORMANCE_REPORT))) die(`${CONFORMANCE_REPORT} is already in the checkout: the report must be the one this run writes`)
   npm(["ci", "--ignore-scripts"])
   const run = spawnSync("npm", ["run", "conformance"], { stdio: "inherit" })
@@ -100,8 +112,9 @@ function conformance(argv) {
   const text = readFileSync(path, "utf8")
   const problems = conformanceReportProblems(text, pkg)
   if (problems.length) die(problems.join("; "))
+  if (present(out)) die(`${options.out} appeared during npm run conformance: only this script makes it, after the run`)
   mkdirSync(out, { recursive: true })
-  writeFileSync(join(out, CONFORMANCE_ASSET), text)
+  writeFileSync(join(out, CONFORMANCE_ASSET), text, { flag: "wx" })
   console.log(`conformance: ${CONFORMANCE_REPORT} is ok for ${pkg.name} ${pkg.version} on ${options.sha.slice(0, 12)}; written to ${options.out}/${CONFORMANCE_ASSET}`)
 }
 

@@ -103,10 +103,12 @@ Before the approval, the workflow:
   without the lifecycle scripts, only regular files in the allowed paths, no `package.json` under `dist/`, and a second,
   independent build of the parent (its own job) equal to the committed `dist/` byte for byte;
 - **installs** the release commit with `plugin add` on each stock OpenCode host (2.2.3 to 2.2.6);
-- **packs** the commit before installing anything and keeps that tarball, then runs the pack stage against a copy;
-- **runs the conformance kit** on the parent, for a plugin that declares sources (above), and keeps its report;
-- **stages** the Release: verifies the attested native files, adds the conformance report of a plugin that declares
-  sources, writes `SHA256SUMS` and the notes (the version's CHANGELOG section), and shows them all in the run summary
+- **packs** the commit before installing anything, keeps that tarball and records its sha256, then runs the pack stage
+  against a copy;
+- **runs the conformance kit** on the parent, for a plugin that declares sources (above), and uploads only its report;
+- **stages** the Release: verifies the attested native files, takes the conformance report of a plugin that declares
+  sources from its job's artifact (exactly that one file, at most 256 KiB, nothing else), checks after every download
+  that the staged tarball is the one the pack job kept (its sha256), writes `SHA256SUMS` and the notes (the version's CHANGELOG section), and shows them all in the run summary
   with the sha256 of `SHA256SUMS`.
 
 A job either runs repository or dependency code (`npm ci`, the build, the pack stage, a host install) and has no write
@@ -117,8 +119,9 @@ runner, so that code could reach a read-only token for this public repository an
 pass files as artifacts downloaded by the id the uploading job gave, and each is checked again on arrival.
 
 After the approval, it downloads the staged artifact by the id the summary names, and refuses unless `SHA256SUMS` has
-the sha256 the summary shows and every staged file matches it, and every native file is the one the release commit's
-`manifest/native.json` pins, size and sha256, with each gzip holding the pinned executable. Then it checks everything again, creates the annotated tag
+the sha256 the summary shows and every staged file matches it, the tarball is the one the pack job kept (its sha256),
+every native file is the one the release commit's `manifest/native.json` pins, size and sha256, with each gzip holding
+the pinned executable, and the conformance report is ok for this version. Then it checks everything again, creates the annotated tag
 `v<version>` on the release commit (tagger `github-actions[bot]`, unsigned), checks the tag, creates the Release with the
 notes, the tarball, the native files and `SHA256SUMS`, and deletes `release/v<version>`. The tag keeps the commit.
 

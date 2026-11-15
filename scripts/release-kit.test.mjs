@@ -20,7 +20,7 @@ import { FIXTURE_SCHEMA, toolsDigest } from "./check-drift.mjs"
 import "./drift-kit.test.mjs"
 import { publish } from "./publish-release.mjs"
 import { pathsText } from "./release-commit.mjs"
-import { cleanup, commit, conformanceAssetProblems, MAX_FILE, MAX_PAYLOAD, nativeAssetProblems, plan, releaseFiles, sumsProblems, tagRelease } from "./release-github.mjs"
+import { cleanup, commit, conformanceAssetProblems, keptTarballProblems, MAX_FILE, MAX_PAYLOAD, nativeAssetProblems, plan, releaseFiles, sumsProblems, tagRelease, takeConformanceReport } from "./release-github.mjs"
 import {
   ACTIONS_BOT,
   allowedPath,
@@ -28,6 +28,7 @@ import {
   ciMatrix,
   COMMIT_MUTATION,
   CONFORMANCE_ASSET,
+  CONFORMANCE_MAX_BYTES,
   CONFORMANCE_REPORT,
   conformanceReportProblems,
   conformanceSetupProblems,
@@ -918,10 +919,11 @@ const pluginSource = (version, { native = false, changelog = TWO } = {}) => ({
 
 /**
  * A plugin that declares sources, with an `npm run conformance` (conformance.mjs) that writes the report: `report`
- * changes what it writes, `exit` its exit code, `write: false` writes nothing, and `script: null` leaves no npm script.
+ * changes what it writes, `exit` its exit code, `write: false` writes nothing, `script: null` leaves no npm script, and
+ * `extra` is more code the run executes (repository or dependency code, as far as the kit can tell).
  */
 const SOURCES = { contractVersion: 1, rpc: "kit-test.tools", items: [] }
-const sourcesSource = (version, { report = {}, exit = 0, write = true, script = "node conformance.mjs" } = {}) => {
+const sourcesSource = (version, { report = {}, exit = 0, write = true, script = "node conformance.mjs", extra = "" } = {}) => {
   const base = pluginSource(version)
   const pkg = { ...JSON.parse(base["package.json"]), sources: SOURCES }
   if (script !== null) pkg.scripts = { ...pkg.scripts, conformance: script }
@@ -930,7 +932,7 @@ const sourcesSource = (version, { report = {}, exit = 0, write = true, script = 
     ...base,
     ".gitignore": "dist/\nnode_modules/\nreports/\n",
     "package.json": serialise(pkg),
-    "conformance.mjs": `import { mkdirSync, writeFileSync } from "node:fs"\n${write ? `mkdirSync("reports", { recursive: true })\nwriteFileSync("reports/conformance-report.json", ${JSON.stringify(`${JSON.stringify(body, null, 2)}\n`)})\n` : ""}process.exit(${exit})\n`,
+    "conformance.mjs": `import { mkdirSync, writeFileSync } from "node:fs"\n${write ? `mkdirSync("reports", { recursive: true })\nwriteFileSync("reports/conformance-report.json", ${JSON.stringify(`${JSON.stringify(body, null, 2)}\n`)})\n` : ""}${extra}process.exit(${exit})\n`,
   }
 }
 
@@ -1968,6 +1970,7 @@ describe("CI: macOS on pushes to master and for releases, never on pull requests
 
 describe("the conformance report of a plugin that declares sources", () => {
   const pkg = { name: "@owner/kit-test", version: "0.0.1" }
+  const sha256 = (text) => createHash("sha256").update(text).digest("hex")
   const report = (extra = {}) => `${JSON.stringify({ plugin: pkg.name, version: pkg.version, ok: true, sources: [], ...extra })}\n`
 
   test("rules: a plugin with sources needs npm run conformance; a report must be ok, for this plugin and version", () => {
@@ -1975,7 +1978,10 @@ describe("the conformance report of a plugin that declares sources", () => {
     assert.deepEqual(conformanceSetupProblems({ ...pkg, sources: SOURCES, scripts: { conformance: "bun scripts/conformance.ts" } }), [])
     assert.match(conformanceSetupProblems({ ...pkg, sources: SOURCES, scripts: { conformance: " " } }).join(), /has no "conformance" script/)
     assert.deepEqual(conformanceReportProblems(report(), pkg), [])
-    assert.deepEqual(conformanceReportProblems(report({ plugin: undefined }), pkg), [], "the plugin's name is optional; when it is there it must match")
+    assert.match(conformanceReportProblems(report({ plugin: undefined }), pkg).join(), /is for undefined, not @owner\/kit-test/, "the report must name this plugin")
+    assert.match(conformanceReportProblems(report({ plugin: 7 }), pkg).join(), /is for 7, not @owner\/kit-test/)
+    assert.deepEqual(conformanceReportProblems(report({ notes: "x".repeat(CONFORMANCE_MAX_BYTES - 200) }), pkg), [])
+    assert.match(conformanceReportProblems(report({ notes: "x".repeat(CONFORMANCE_MAX_BYTES) }), pkg).join(), /has \d+ bytes, over the 262144 a conformance report may have/)
     assert.match(conformanceReportProblems(report({ ok: false }), pkg).join(), /the conformance report is not ok \(ok: false\)/)
     assert.match(conformanceReportProblems(report({ ok: "true" }), pkg).join(), /not ok/)
     assert.match(conformanceReportProblems(report({ version: "0.0.0" }), pkg).join(), /is for version "0\.0\.0", not 0\.0\.1/)
@@ -1985,9 +1991,9 @@ describe("the conformance report of a plugin that declares sources", () => {
   })
 
   describe("release-commit.mjs conformance: the conformance job", () => {
-    const run = (repo, extra = []) => {
+    const run = (repo, extra = [], env = {}) => {
       const out = join(folder(), "conformance")
-      return { out, result: repo.node("release-commit.mjs", ["conformance", "--sha", repo.head, "--out", out, ...extra]) }
+      return { out, result: repo.node("release-commit.mjs", ["conformance", "--sha", repo.head, "--out", out, ...extra], { KIT_DECOY_OUT: out, ...env }) }
     }
 
     test("runs npm run conformance on the parent and keeps the report, as the asset the stage job lists", () => {
@@ -2010,6 +2016,27 @@ describe("the conformance report of a plugin that declares sources", () => {
       const committed = repository({ ...sourcesSource("0.0.1"), ".gitignore": "dist/\nnode_modules/\n", "reports/conformance-report.json": report() })
       assert.match(run(committed).result.stderr, /reports\/conformance-report\.json is already in the checkout/)
       for (const bad of [run(repository(sourcesSource("0.0.1", { exit: 1 }))).out]) assert.equal(existsSync(bad), false, "nothing is kept from a refused run")
+    })
+
+    test("refuses when anything the run does puts a file where the report is kept: a decoy tarball, another file, a symlink", () => {
+      // The run's code (the repository's or a dependency's) learns --out (from the job's command line) and writes there.
+      const decoy = (code) => `{ const { mkdirSync, symlinkSync, writeFileSync } = await import("node:fs"); const out = process.env.KIT_DECOY_OUT; mkdirSync(out, { recursive: true }); ${code} }\n`
+      for (const code of [
+        'writeFileSync(out + "/owner-kit-test-0.0.1.tgz", "EVIL")',
+        'writeFileSync(out + "/notes.txt", "x")',
+        "",
+      ]) {
+        const { out, result } = run(repository(sourcesSource("0.0.1", { extra: decoy(code) })))
+        assert.notEqual(result.status, 0, code)
+        assert.match(result.stderr, /appeared during npm run conformance: only this script makes it, after the run/)
+        assert.equal(existsSync(join(out, CONFORMANCE_ASSET)), false, "no report is kept beside the decoy")
+      }
+      const dangling = `{ const { symlinkSync } = await import("node:fs"); symlinkSync("/nonexistent", process.env.KIT_DECOY_OUT) }\n`
+      assert.match(run(repository(sourcesSource("0.0.1", { extra: dangling }))).result.stderr, /appeared during npm run conformance/, "a dangling symlink counts")
+      const repo = repository(sourcesSource("0.0.1"))
+      const out = join(folder(), "conformance")
+      mkdirSync(out)
+      assert.match(repo.node("release-commit.mjs", ["conformance", "--sha", repo.head, "--out", out]).stderr, /already exists: the conformance job makes it after the run/, "even an empty folder before the run")
     })
   })
 
@@ -2035,6 +2062,78 @@ describe("the conformance report of a plugin that declares sources", () => {
       assert.match(nativeAssetProblems({ dir: staged({ "notes.txt": "x" }), manifest: undefined }).join(), /must be SHA256SUMS and one tarball/)
     })
 
+    test("take-conformance copies only the report, from a folder holding exactly that one regular file of a bounded size", () => {
+      const artifact = (files) => {
+        const dir = folder()
+        writeTree(dir, files)
+        return dir
+      }
+      const target = staged({})
+      assert.deepEqual(takeConformanceReport({ from: artifact({ [CONFORMANCE_ASSET]: report() }), dir: target }), { bytes: report().length })
+      assert.equal(readFileSync(join(target, CONFORMANCE_ASSET), "utf8"), report())
+      assert.deepEqual(readdirSync(target).sort(), ["SHA256SUMS", CONFORMANCE_ASSET, "kit-test-0.0.1.tgz"])
+      assert.throws(() => takeConformanceReport({ from: artifact({ [CONFORMANCE_ASSET]: report() }), dir: target }), /conformance-report\.json is already staged/)
+      for (const [files, why] of [
+        [{ [CONFORMANCE_ASSET]: report(), "kit-test-0.0.1.tgz": "EVIL" }, /must hold only conformance-report\.json, and it holds conformance-report\.json, kit-test-0\.0\.1\.tgz/],
+        [{ [CONFORMANCE_ASSET]: report(), "notes.txt": "x" }, /must hold only conformance-report\.json/],
+        [{ [`nested/${CONFORMANCE_ASSET}`]: report() }, /holds nested/],
+        [{}, /holds nothing/],
+        [{ [CONFORMANCE_ASSET]: "x".repeat(CONFORMANCE_MAX_BYTES + 1) }, /has 262145 bytes, over 262144/],
+      ]) assert.throws(() => takeConformanceReport({ from: artifact(files), dir: staged({}) }), why)
+      const linked = folder()
+      symlinkSync(join(artifact({ "r.json": report() }), "r.json"), join(linked, CONFORMANCE_ASSET))
+      assert.throws(() => takeConformanceReport({ from: linked, dir: staged({}) }), /is not a regular file/)
+      const folderNamed = folder()
+      mkdirSync(join(folderNamed, CONFORMANCE_ASSET))
+      assert.throws(() => takeConformanceReport({ from: folderNamed, dir: staged({}) }), /is not a regular file/)
+    })
+
+    test("kept: the staged tarball is the one the pack job recorded, alone outside native/, SHA256SUMS and the report", () => {
+      const good = sha256("t")
+      assert.deepEqual(keptTarballProblems({ dir: staged({}), sha256: good }), [])
+      assert.deepEqual(keptTarballProblems({ dir: staged({ [CONFORMANCE_ASSET]: report(), "native/x.gz": "n" }), sha256: good }), [])
+      assert.match(keptTarballProblems({ dir: staged({ "kit-test-0.0.1.tgz": "EVIL" }), sha256: good }).join(), /has the sha256 [0-9a-f]{64}, not [0-9a-f]{64}, the one the pack job recorded: it is not the kept tarball/)
+      assert.match(keptTarballProblems({ dir: staged({ "other-0.0.1.tgz": "t" }), sha256: good }).join(), /must be one tarball .* and they are kit-test-0\.0\.1\.tgz, other-0\.0\.1\.tgz/)
+      assert.match(keptTarballProblems({ dir: staged({ "notes.txt": "x" }), sha256: good }).join(), /must be one tarball/)
+      assert.match(keptTarballProblems({ dir: staged({}), sha256: "" }).join(), /the sha256 the pack job recorded for the kept tarball was not given/)
+    })
+
+    test("the stage job's steps, end to end: a decoy tarball from the conformance step never replaces the packed one", () => {
+      // The workflow's order: the pack job's tarball (its sha256 recorded before any dependency is installed), kept, the
+      // conformance artifact into a folder of its own, take-conformance, kept again; then the report check and SHA256SUMS.
+      const repo = repository(sourcesSource("0.0.1"))
+      const cli = (args) => repo.node("release-github.mjs", args)
+      const stage = (artifactFiles) => {
+        const release = folder()
+        writeTree(release, { "owner-kit-test-0.0.1.tgz": "GOOD" })
+        const recorded = sha256("GOOD")
+        const artifact = folder()
+        writeTree(artifact, artifactFiles)
+        const steps = [
+          ["kept", "--dir", release, "--sha256", recorded],
+          ["take-conformance", "--from", artifact, "--dir", release],
+          ["kept", "--dir", release, "--sha256", recorded],
+          ["conformance", "--dir", release, "--commit", repo.head],
+        ]
+        for (const step of steps) {
+          const result = cli(step)
+          if (result.status !== 0) return { release, refused: result.stderr }
+        }
+        return { release }
+      }
+      const clean = stage({ [CONFORMANCE_ASSET]: report() })
+      assert.equal(clean.refused, undefined)
+      assert.deepEqual(readdirSync(clean.release).sort(), [CONFORMANCE_ASSET, "owner-kit-test-0.0.1.tgz"])
+      assert.equal(readFileSync(join(clean.release, "owner-kit-test-0.0.1.tgz"), "utf8"), "GOOD", "the published tarball is the packed one")
+      const decoy = stage({ [CONFORMANCE_ASSET]: report(), "owner-kit-test-0.0.1.tgz": "EVIL", "notes.txt": "x" })
+      assert.match(decoy.refused, /the conformance artifact must hold only conformance-report\.json/)
+      assert.equal(readFileSync(join(decoy.release, "owner-kit-test-0.0.1.tgz"), "utf8"), "GOOD", "nothing from the artifact reached the staged folder")
+      // Even had a download overwritten it (download-artifact extracts over existing files), kept refuses the swap.
+      const overwritten = folder()
+      writeTree(overwritten, { "owner-kit-test-0.0.1.tgz": "EVIL", [CONFORMANCE_ASSET]: report() })
+      assert.match(cli(["kept", "--dir", overwritten, "--sha256", sha256("GOOD")]).stderr, /release-github: the staged tarball is not the one the pack job kept: owner-kit-test-0\.0\.1\.tgz has the sha256/)
+    })
+
     test("the CLI reads the release commit's package.json", () => {
       const repo = repository(sourcesSource("0.0.1"))
       const cli = (dir) => repo.node("release-github.mjs", ["conformance", "--dir", dir, "--commit", repo.head])
@@ -2054,12 +2153,24 @@ describe("the conformance report of a plugin that declares sources", () => {
     assert.match(conformance, /if: \$\{\{ !cancelled\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.sources == 'true' \}\}/)
     assert.match(conformance, /permissions:\n {6}contents: read\n/)
     assert.match(conformance, /run: node scripts\/release-commit\.mjs conformance --sha "\$PARENT" --out "\$RUNNER_TEMP\/conformance"/)
+    assert.match(conformance, /name: conformance-report\n {10}path: \$\{\{ runner\.temp \}\}\/conformance\/conformance-report\.json\n/, "only the report is uploaded")
     assert.match(job("plan"), /sources: \$\{\{ steps\.plan\.outputs\.sources \}\}/)
     const stage = job("stage")
     assert.match(stage, /needs: \[plan, commit, hosts, pack, conformance\]/)
     assert.match(stage, /needs\.plan\.outputs\.sources != 'true' \|\| needs\.conformance\.result == 'success'/)
-    assert.match(stage, /artifact-ids: \$\{\{ needs\.conformance\.outputs\.report_artifact \}\}\n {10}path: \$\{\{ runner\.temp \}\}\/assets\/release/)
-    assert.ok(stage.indexOf("release-github.mjs conformance") < stage.indexOf("Write SHA256SUMS"), "the report is checked, then listed in SHA256SUMS")
+    assert.match(stage, /artifact-ids: \$\{\{ needs\.conformance\.outputs\.report_artifact \}\}\n {10}path: \$\{\{ runner\.temp \}\}\/conformance-artifact\n/, "the report's artifact goes to a folder of its own")
+    assert.equal((stage.match(/path: \$\{\{ runner\.temp \}\}\/assets\/release\n/g) ?? []).length, 1, "only the pack job's artifact is downloaded into the staged folder")
+    assert.match(stage, /TARBALL_SHA256: \$\{\{ needs\.pack\.outputs\.tarball_sha256 \}\}/)
+    const take = stage.indexOf("release-github.mjs take-conformance --from \"$RUNNER_TEMP/conformance-artifact\" --dir \"$RUNNER_TEMP/assets/release\"")
+    const kept = [...stage.matchAll(/release-github\.mjs kept --dir "\$RUNNER_TEMP\/assets\/release" --sha256 "\$TARBALL_SHA256"/g)].map((match) => match.index)
+    const downloads = [...stage.matchAll(/actions\/download-artifact@|scripts\/attach-native\.mjs/g)].map((match) => match.index)
+    assert.ok(take > 0 && kept.length === 2, "take-conformance, and kept twice")
+    assert.ok(downloads.every((at) => kept.some((check) => check > at)) && kept.at(-1) > take, "kept runs after every download, and after the report is taken")
+    assert.ok(kept.at(-1) < stage.indexOf("Write SHA256SUMS") && stage.indexOf("release-github.mjs conformance") < stage.indexOf("Write SHA256SUMS"), "the tarball and the report are checked, then listed in SHA256SUMS")
+    const pack = job("pack")
+    assert.match(pack, /tarball_sha256: \$\{\{ steps\.kept\.outputs\.sha256 \}\}/)
+    assert.ok(pack.indexOf("id: kept") > pack.indexOf("npm pack --ignore-scripts") && pack.indexOf("id: kept") < pack.indexOf("npm ci"), "the sha256 is recorded before any dependency is installed")
+    assert.match(job("publish"), /needs: \[plan, commit, pack, stage\][\s\S]*release-github\.mjs sums[\s\S]*TARBALL_SHA256: \$\{\{ needs\.pack\.outputs\.tarball_sha256 \}\}\n {8}run: node scripts\/release-github\.mjs kept --dir "\$RUNNER_TEMP\/assets\/release" --sha256 "\$TARBALL_SHA256"/)
     assert.match(job("publish"), /node scripts\/release-github\.mjs conformance --dir "\$RUNNER_TEMP\/assets\/release" --commit "\$COMMIT"/)
   })
 

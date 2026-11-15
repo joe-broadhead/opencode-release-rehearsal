@@ -8,7 +8,7 @@ name: release
 # and the GitHub Release. Agents never approve: only the owner approves a release (CONTRIBUTING.md, "Releasing").
 #
 # Least privilege: contents: write is held only by `commit`, `publish` and `cleanup`. Jobs are of two kinds, never
-# mixed. The ones that run repository or dependency code (`build`, `rebuild`, `hosts`, `pack`) have no write token: their
+# mixed. The ones that run repository or dependency code (`build`, `rebuild`, `conformance`, `hosts`, `pack`) have no write token: their
 # permissions are contents: read only, no step gets GH_TOKEN, and setup-node and setup-bun get an empty token. What they
 # still expose, and only read-only: actions/checkout requires a token and fetches with the job's contents: read token,
 # and its post step, like the upload-artifact steps (which carry the runner's artifact token), runs after repository
@@ -227,7 +227,9 @@ jobs:
 
   # A plugin that declares sources (package.json `sources`) only: the source contract's conformance kit, run on the parent
   # by the repository's own `npm run conformance`. A failing run, or a report that is not ok, stops the release before
-  # anything is staged. The report becomes a Release asset, listed in SHA256SUMS. No write token.
+  # anything is staged. The report becomes a Release asset, listed in SHA256SUMS. No write token. Only the report is
+  # uploaded, and stage takes only that one file from it, into a folder of its own, so nothing the run writes can reach
+  # the kept tarball.
   conformance:
     name: conformance report
     needs: plan
@@ -261,7 +263,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conformance-report
-          path: ${{ runner.temp }}/conformance
+          path: ${{ runner.temp }}/conformance/conformance-report.json
           if-no-files-found: error
 
   # A fresh checkout of the release commit: its identity (GitHub API), one parent on master, the allowed change, no
@@ -361,6 +363,7 @@ jobs:
       contents: read
     outputs:
       tarball_artifact: ${{ steps.tarball.outputs.artifact-id }}
+      tarball_sha256: ${{ steps.kept.outputs.sha256 }}
     env:
       COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
     steps:
@@ -382,6 +385,13 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/tarball"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/tarball"
+      # Before any repository or dependency code runs. stage and publish refuse a staged tarball with any other sha256.
+      - id: kept
+        name: Record the kept tarball's sha256
+        run: |
+          set -- "$RUNNER_TEMP"/tarball/*
+          if [ "$#" != 1 ] || [ ! -f "$1" ] || [ -L "$1" ] || [ "${1%.tgz}" = "$1" ]; then echo "::error::npm pack did not write one tarball"; exit 1; fi
+          echo "sha256=$(sha256sum "$1" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - id: tarball
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -419,6 +429,7 @@ jobs:
       COMMIT: ${{ needs.commit.outputs.commit || needs.plan.outputs.commit }}
       TAG: ${{ needs.plan.outputs.tag }}
       MODE: ${{ needs.plan.outputs.mode }}
+      TARBALL_SHA256: ${{ needs.pack.outputs.tarball_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -442,13 +453,8 @@ jobs:
         with:
           artifact-ids: ${{ needs.pack.outputs.tarball_artifact }}
           path: ${{ runner.temp }}/assets/release
-      - name: Check that the pack job kept one tarball
-        run: |
-          files="$(find "$RUNNER_TEMP/assets/release" -type f)"
-          if [ "$(printf '%s\n' "$files" | grep -c .)" != 1 ] || ! printf '%s\n' "$files" | grep -q '\.tgz$'; then
-            echo "::error::the release-tarball artifact is not one tarball"
-            exit 1
-          fi
+      - name: Check that the staged tarball is the one the pack job kept
+        run: node scripts/release-github.mjs kept --dir "$RUNNER_TEMP/assets/release" --sha256 "$TARBALL_SHA256"
       # Native plugins only (a release commit with no manifest/native.json skips this step): the run is the one the
       # manifest pins, its artifacts match the manifest's sizes and sha256, the gzips hold the pinned executables, and
       # each file carries a verified attestation.
@@ -457,7 +463,8 @@ jobs:
         run: node scripts/attach-native.mjs --out "$RUNNER_TEMP/assets/release/native"
         env:
           GH_TOKEN: ${{ github.token }}
-      # A plugin that declares sources only: the conformance job's report, by the id that job gave, beside SHA256SUMS.
+      # A plugin that declares sources only: the conformance job's report, by the id that job gave, downloaded into a folder
+      # of its own; only conformance-report.json is taken from it, beside SHA256SUMS.
       - name: Refuse an empty artifact id
         if: needs.plan.outputs.sources == 'true'
         env:
@@ -467,7 +474,12 @@ jobs:
         if: needs.plan.outputs.sources == 'true'
         with:
           artifact-ids: ${{ needs.conformance.outputs.report_artifact }}
-          path: ${{ runner.temp }}/assets/release
+          path: ${{ runner.temp }}/conformance-artifact
+      - name: Take only the conformance report from its artifact
+        if: needs.plan.outputs.sources == 'true'
+        run: node scripts/release-github.mjs take-conformance --from "$RUNNER_TEMP/conformance-artifact" --dir "$RUNNER_TEMP/assets/release"
+      - name: Check again, after every download, that the staged tarball is the one the pack job kept
+        run: node scripts/release-github.mjs kept --dir "$RUNNER_TEMP/assets/release" --sha256 "$TARBALL_SHA256"
       - name: Check the conformance report against the release commit's sources
         run: node scripts/release-github.mjs conformance --dir "$RUNNER_TEMP/assets/release" --commit "$COMMIT"
       - id: sums
@@ -533,7 +545,7 @@ jobs:
   # again, and the tag and the Release are created. Builds nothing and runs no repository script.
   publish:
     name: tag and publish the Release
-    needs: [plan, commit, stage]
+    needs: [plan, commit, pack, stage]
     if: ${{ !cancelled() && needs.stage.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -572,6 +584,10 @@ jobs:
         env:
           SUMS_SHA256: ${{ needs.stage.outputs.sums_sha256 }}
         run: node scripts/release-github.mjs sums --dir "$RUNNER_TEMP/assets/release" --sums-sha256 "$SUMS_SHA256"
+      - name: Check that the staged tarball is the one the pack job kept
+        env:
+          TARBALL_SHA256: ${{ needs.pack.outputs.tarball_sha256 }}
+        run: node scripts/release-github.mjs kept --dir "$RUNNER_TEMP/assets/release" --sha256 "$TARBALL_SHA256"
       # The pack stage ran in another job; this job, after the approval, runs no repository or dependency code. Every
       # native file is checked against the release commit's own manifest, executables decompressed.
       - name: Check every native file against the release commit's manifest/native.json
