@@ -11,7 +11,7 @@ const END = "// <<< PLUGIN-SPECIFIC <<<"
 
 const COPIES = [
   { path: "src/host/tools-rpc.ts", optional: true, sha256: "15d82caa53aaae7ad9efb88dddb97056d3895c4dbf49b8efbb85b743871b2a6d", part: sharedPart },
-  { path: "test/support/jelly-kit.ts", optional: false, sha256: "ab599abcf041044c77e7938c3d9a081e00072487a7ec20b654d86c8230951190", part: (text) => text },
+  { path: "test/support/jelly-kit.ts", optional: false, sha256: "de4bed563f37e39a596ba50908cac32f596a1d616b068daa327c2942e3f0aed5", part: (text) => text },
   // The release kit, whole: one version in every plugin (CONTRIBUTING.md, Releasing). Change it in every plugin at once.
   { path: "scripts/attach-native.mjs", optional: false, sha256: "835b12b5d4e95fe87f61a2656f7be0baf8c805299cadff7110a16a6f2b475f8e", part: (text) => text },
   { path: "scripts/capture-tools.mjs", optional: false, sha256: "bf1276b41979c94519f4d42c580ebf8b077b66cb969fa234063a241d0073fa63", part: (text) => text },
@@ -19,7 +19,7 @@ const COPIES = [
   { path: "scripts/check-drift.mjs", optional: false, sha256: "328217e149e6e840facfd6297d8b3d4d2effbbd8ba7f5a1c7dfa6e54f47550a4", part: (text) => text },
   { path: "scripts/check-release-plugin-add.sh", optional: false, sha256: "557fda41255c0b9fd0d3be3e7fc9518fc2cb097cd8fc9766b76fa0b3c3620f89", part: (text) => text },
   { path: "scripts/check-release-shape.mjs", optional: false, sha256: "cca057c01cbbd1c3caead2b769b47fae9037243d3e3e4f322d7dfab02d3b3f46", part: (text) => text },
-  { path: "scripts/drift-kit.test.mjs", optional: false, sha256: "f8e937b1c1d2a300ae23a669037aa4de142797d0ef02629321d3cf432d777fc1", part: (text) => text },
+  { path: "scripts/drift-kit.test.mjs", optional: false, sha256: "e7246a66dd6d328dd375c825c481c9ebcfa5cd9f84ba87e095a0d1b8fb65fb66", part: (text) => text },
   { path: "scripts/jelly-family-block.md", optional: false, sha256: "100a42223681d3d0b06db1abd5f218cb33ea7d4733fb2131151ebf725e637564", part: (text) => text },
   { path: "scripts/native-manifest.mjs", optional: false, sha256: "4dc1025825b2802cc6afc31e597745f89dd1da9a50856ca69b3f3322844ecfc7", part: (text) => text },
   { path: "scripts/publish-release.mjs", optional: false, sha256: "9615e2eaab236a8ba01c133be87a2428d17a5612716a4df05c788ff1be7668a1", part: (text) => text },
