@@ -41,6 +41,10 @@
 //   doc-unknown-tool     a skill or doc names a tool that is neither served, own, nor declared and gated
 //   doc-unknown-param    a skill or doc passes a parameter the served tool's input schema lacks
 //   jelly-count          docs/jelly.md's "N tools are declared (M read-only)" disagrees with the declaration
+//   family-block         docs/jelly.md does not carry jelly's shared block (scripts/jelly-family-block.md) once,
+//                        between its markers, byte for byte; WARN when a plugin with a declaration has no docs/jelly.md
+//   family-contradiction a sentence of docs/jelly.md outside the block contradicts it: FAIL when it says an effect of
+//                        allow makes a tool run (the block's fourth sentence rules that out), WARN for looser matches
 //   capture-stale        (--release) a live capture older than --max-age days (default 14), with no waiver in
 //                        provenance.json for exactly that capture: { "waiver": { "listedAt": "<the capture's date>",
 //                        "reason": "…", "approvedBy": "…" } }. A new capture drops the waiver.
@@ -147,6 +151,50 @@ export const namespaceOf = (server) => server.replace(/[^a-zA-Z0-9_-]/g, "_")
 export const permissionOf = (namespace, tool) => `${namespaceOf(namespace)}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0
+
+export const FAMILY_BLOCK_START = "<!-- family-block:start -->"
+export const FAMILY_BLOCK_END = "<!-- family-block:end -->"
+/** The text from the start marker to the end marker, both included, or undefined. */
+export function familyBlockOf(text) {
+  const start = text.indexOf(FAMILY_BLOCK_START)
+  const end = text.indexOf(FAMILY_BLOCK_END)
+  return start < 0 || end < start ? undefined : text.slice(start, end + FAMILY_BLOCK_END.length)
+}
+/** Jelly's shared block, as the kit vendors it (scripts/jelly-family-block.md): read here, never fetched. */
+export const FAMILY_BLOCK = familyBlockOf(readFileSync(new URL("./jelly-family-block.md", import.meta.url), "utf8"))
+
+/**
+ * Sentences of a plugin's own docs/jelly.md (outside the block, code left out) that contradict the block. The one
+ * unambiguous case fails: an effect of allow said to make, let or mean a tool runs (sentence 4: allow changes nothing).
+ * Looser matches warn: the same words without the causal verb; a tool asking or being off at Allowed (sentence 1); deny
+ * at Allowed (sentence 6); an undeclared tool running at Ask before changes or Read only (sentences 2 and 3).
+ */
+export function familyContradictions(text) {
+  const prose = text.replace(/```[\s\S]*?```/g, (block) => block.replace(/[^\n]/g, " "))
+  const found = []
+  const sentences = prose.matchAll(/[^.!?\n](?:[^.!?]|\.(?=\w)|\n(?!\n))*[.!?]?/g)
+  for (const match of sentences) {
+    const sentence = match[0].replace(/\s+/g, " ").trim()
+    const line = prose.slice(0, match.index).split("\n").length
+    const allowEffect = /`?effect`?[^.]{0,40}`?\ballow\b`?|\ballow\b`?\s+effect/i.test(sentence)
+    if (allowEffect && /\b(lets|makes|means|so that|so)\b[^.]{0,50}\b(run|runs)\b(?! only)/i.test(sentence) && !/changes nothing|follows the access/i.test(sentence)) {
+      found.push({ level: "fail", line, sentence, detail: "an effect of allow is said to make a tool run; jelly's shared block: \"A declared `effect` of `allow` changes nothing\"" })
+    } else if (allowEffect && /\bruns?\b[^.]{0,30}\bwithout asking\b/i.test(sentence) && !/changes nothing|follows the access|at Allowed|`all`/i.test(sentence)) {
+      found.push({ level: "warn", line, sentence, detail: "an effect of allow beside a tool running without asking: allow changes nothing (the block's fourth sentence)" })
+    }
+    const atAllowed = /\b(asks?(?: first)?|is off|turned off|(?:is )?denied|refused|blocked)\b[^,;.]{0,25}\bat (?:Allowed|`all`)\b|\bat (?:Allowed|`all`)\b[^,;.]{0,25}\b(asks?|is off|turned off|(?:is )?denied|refuses|blocked)\b/i
+    if (atAllowed.test(sentence) && !/\bnever\b|\bnot\b|changes nothing/i.test(sentence)) {
+      found.push({ level: "warn", line, sentence, detail: "a tool asks or is off at Allowed; the block: at Allowed every tool runs without asking, whatever its effect" })
+    }
+    if (/\bdeny\b/i.test(sentence) && /\bat (?:Allowed|`all`)/i.test(sentence) && /\b(off|denied|refused|blocked)\b/i.test(sentence) && !/changes nothing|\bnot\b/i.test(sentence)) {
+      found.push({ level: "warn", line, sentence, detail: "deny turns a tool off at Allowed; the block: deny changes nothing at Allowed" })
+    }
+    if (/\b(undeclared|not declare[sd]?|does not declare)\b/i.test(sentence) && /\bruns?\b/i.test(sentence) && /(Read only|`read-only`|Ask before changes|`ask-changes`)/.test(sentence) && !/\b(asks|is off|turned off)\b/i.test(sentence)) {
+      found.push({ level: "warn", line, sentence, detail: "an undeclared tool runs at Ask before changes or Read only; the block: it asks there, or is off" })
+    }
+  }
+  return found
+}
 
 function readJson(path, { optional = false } = {}) {
   if (!existsSync(path)) {
@@ -300,7 +348,7 @@ export function maskCaptureWording(root) {
 }
 
 /** Runs every check on what the repository holds. Returns the findings: { level: "fail" | "warn" | "note", kind, … }. */
-export function checkDrift({ pkg, fixture, provenance, registry = {}, effectExceptions = {}, docs = [], jellyDoc, fixtureText, release = false, today, maxAgeDays = MAX_AGE_DAYS }) {
+export function checkDrift({ pkg, fixture, provenance, registry = {}, effectExceptions = {}, docs = [], jellyDoc, fixtureText, release = false, today, maxAgeDays = MAX_AGE_DAYS, familyBlock = FAMILY_BLOCK }) {
   const findings = []
   const add = (level, kind, item) => findings.push({ level, kind, ...item })
   const declared = pkg?.jelly?.tools
@@ -346,8 +394,26 @@ export function checkDrift({ pkg, fixture, provenance, registry = {}, effectExce
     add(nonEmpty(reason) ? "note" : "fail", "effect-not-allow", { tool: tool.name, detail: nonEmpty(reason) ? `owner-approved: ${reason}` : `effect ${tool.effect}; OD-29 declares every tool allow` })
   }
 
+  // jelly's shared block in docs/jelly.md, word for word, and no sentence outside it that contradicts it
+  // jellyDoc is null when the repository has no docs/jelly.md, undefined when the caller passed none.
+  if (jellyDoc === null) add("warn", "family-block", { file: "docs/jelly.md", detail: "no docs/jelly.md: it carries jelly's shared block (scripts/jelly-family-block.md) between its markers" })
+  else if (jellyDoc !== undefined) {
+    const starts = jellyDoc.split(FAMILY_BLOCK_START).length - 1
+    const ends = jellyDoc.split(FAMILY_BLOCK_END).length - 1
+    const mine = familyBlockOf(jellyDoc)
+    if (starts !== 1 || ends !== 1 || mine === undefined) add("fail", "family-block", { file: "docs/jelly.md", detail: `carries ${starts} start and ${ends} end markers: it must carry jelly's shared block once, between ${FAMILY_BLOCK_START} and ${FAMILY_BLOCK_END}, copied from scripts/jelly-family-block.md` })
+    else if (mine !== familyBlock) {
+      const a = mine.split("\n")
+      const b = familyBlock.split("\n")
+      const at = a.findIndex((text, index) => text !== b[index])
+      add("fail", "family-block", { file: "docs/jelly.md", line: jellyDoc.slice(0, jellyDoc.indexOf(FAMILY_BLOCK_START)).split("\n").length + Math.max(at, 0), detail: "the shared block differs from jelly's (scripts/jelly-family-block.md): copy it word for word" })
+    }
+    const outside = mine === undefined ? jellyDoc : jellyDoc.replace(mine, (block) => block.replace(/[^\n]/g, " "))
+    for (const item of familyContradictions(outside)) add(item.level, "family-contradiction", { file: "docs/jelly.md", line: item.line, detail: `${item.detail}: "${item.sentence.slice(0, 160)}"` })
+  }
+
   // docs/jelly.md's count (every plugin, with a capture or not)
-  if (jellyDoc !== undefined && /tools are declared/.test(jellyDoc)) {
+  if (typeof jellyDoc === "string" && /tools are declared/.test(jellyDoc)) {
     const readOnly = declared.filter((tool) => tool.readOnly === true).length
     const match = jellyDoc.match(/(\d+) tools are declared(?: \((\d+) read-only\))?/)
     if (!match || Number(match[1]) !== declared.length || (match[2] !== undefined && Number(match[2]) !== readOnly)) {
@@ -532,7 +598,7 @@ export function driftReport(root, { release = false, today = new Date().toISOStr
     registry: readJson(join(root, REGISTRY), { optional: true }) ?? {},
     effectExceptions: readJson(join(root, EFFECT_EXCEPTIONS), { optional: true }) ?? {},
     docs: docFiles(root).map((path) => ({ file: relative(root, path).split("\\").join("/"), text: readFileSync(path, "utf8") })),
-    jellyDoc: existsSync(join(root, "docs", "jelly.md")) ? readFileSync(join(root, "docs", "jelly.md"), "utf8") : undefined,
+    jellyDoc: existsSync(join(root, "docs", "jelly.md")) ? readFileSync(join(root, "docs", "jelly.md"), "utf8") : null,
     release,
     today,
     maxAgeDays,

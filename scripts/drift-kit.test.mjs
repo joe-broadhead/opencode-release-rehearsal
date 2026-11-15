@@ -24,7 +24,7 @@ import {
   Skip,
   writeFixture,
 } from "./capture-tools.mjs"
-import { accountValuesIn, ageInDays, canonical, checkDrift, driftReport, FIXTURE_SCHEMA, maskCaptureWording, objectKeys, permissionOf, referencesIn, reportLines, sha256, toolsDigest } from "./check-drift.mjs"
+import { accountValuesIn, ageInDays, canonical, checkDrift, driftReport, FAMILY_BLOCK, FAMILY_BLOCK_END, FAMILY_BLOCK_START, familyContradictions, FIXTURE_SCHEMA, maskCaptureWording, objectKeys, permissionOf, referencesIn, reportLines, sha256, toolsDigest } from "./check-drift.mjs"
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url))
 const scratch = mkdtempSync(join(tmpdir(), "drift-kit-test-"))
@@ -251,6 +251,54 @@ describe("check-drift: the capture's own words and the forbidden-word check", ()
     assert.equal(mask("test/fixtures/live-tools.json", "other-rule", line), line)
     assert.equal(mask("docs/notes.md", "house-words", line), line)
     assert.equal(maskCaptureWording(folder())("test/fixtures/live-tools.json", "house-words", line), line, "no registry, no exemption")
+  })
+})
+
+describe("check-drift: jelly's shared block in docs/jelly.md", () => {
+  const pkg = { jelly: { tools: [tool("search")] } }
+  const capture = fixture([served("search", true)])
+  const doc = (body) => `# In Jelly\n\n## Tools and permissions\n\n1 tools are declared (1 read-only).\n\n${body}\n\n## Skills\n`
+  const block = (jellyDoc) => run({ pkg, fixture: capture, jellyDoc }).filter((finding) => finding.kind.startsWith("family"))
+
+  test("the kit vendors jelly's twelve sentences between the markers, with where they come from", () => {
+    const lines = FAMILY_BLOCK.split("\n")
+    assert.deepEqual([lines[0], lines.at(-1), lines.length], [FAMILY_BLOCK_START, FAMILY_BLOCK_END, 14])
+    assert.equal(lines.slice(1, -1).every((line) => line.startsWith("- ")), true)
+    assert.match(readFileSync(join(SCRIPTS, "jelly-family-block.md"), "utf8"), /docs\/guides\/plugin-authors\.md lines 701-714 at commit 875026118/)
+    assert.match(FAMILY_BLOCK, /- A declared `effect` of `allow` changes nothing: the tool follows the access choice and its `readOnly`\./)
+  })
+
+  test("passes the block word for word, once; fails it missing, changed, twice or unclosed", () => {
+    assert.deepEqual(block(doc(FAMILY_BLOCK)), [])
+    assert.match(block(doc("No block here."))[0].detail, /carries 0 start and 0 end markers/)
+    const changed = block(doc(FAMILY_BLOCK.replace("whatever its `effect`", "whatever its effect")))
+    assert.deepEqual([changed[0].level, changed[0].kind, changed[0].line], ["fail", "family-block", 8])
+    assert.match(changed[0].detail, /differs from jelly's/)
+    assert.match(block(doc(`${FAMILY_BLOCK}\n\n${FAMILY_BLOCK}`))[0].detail, /carries 2 start and 2 end markers/)
+    assert.match(block(doc(FAMILY_BLOCK.replace(FAMILY_BLOCK_END, "")))[0].detail, /carries 1 start and 0 end markers/)
+    assert.deepEqual(run({ pkg, fixture: capture, jellyDoc: null }).filter((finding) => finding.kind === "family-block").map((finding) => finding.level), ["warn"], "a plugin with a declaration and no docs/jelly.md")
+  })
+
+  test("fails a sentence that says an effect of allow makes a tool run, and warns on looser matches", () => {
+    const failing = familyContradictions("A tool's `effect: allow` makes it run without asking.")
+    assert.deepEqual(failing.map((item) => item.level), ["fail"])
+    assert.deepEqual(familyContradictions("Setting effect to allow lets the tool run at Read only.").map((item) => item.level), ["fail"])
+    assert.deepEqual(familyContradictions("Each tool with the `allow` effect runs without asking.").map((item) => item.level), ["warn"])
+    assert.deepEqual(familyContradictions("Every write asks first at Allowed.").map((item) => item.level), ["warn"])
+    assert.deepEqual(familyContradictions("A tool declared deny is off at Allowed.").map((item) => item.level).sort(), ["warn", "warn"])
+    assert.deepEqual(familyContradictions("A tool this plugin does not declare runs at Read only.").map((item) => item.level), ["warn"])
+  })
+
+  test("leaves the family's own true sentences, code and the block itself alone", () => {
+    for (const sentence of [
+      "It falls under `browse_*`, in Jelly's access level and in the plugin's own rules alike: it runs at Allowed, asks at Ask before changes and is denied at Read only.",
+      "Every declared effect is `allow`, because that is what the default rules give each tool in OpenCode at the default `access: \"all\"`: every tool is allowed, and `access` is how a user restricts them.",
+      "102 tools are declared (58 read-only), and every declared effect is `allow`: the 51 reads and the 6 DM and public-key reads.",
+      "```js\n// effect: allow makes it run\n```",
+    ]) assert.deepEqual(familyContradictions(sentence), [], sentence)
+    assert.deepEqual(block(doc(FAMILY_BLOCK)).filter((item) => item.kind === "family-contradiction"), [], "the block's own sentences are not read as contradictions")
+    const outside = block(doc(`${FAMILY_BLOCK}\n\nHere an \`effect\` of \`allow\` makes the tool run.`))
+    assert.deepEqual(outside.map((item) => [item.level, item.kind]), [["fail", "family-contradiction"]])
   })
 })
 

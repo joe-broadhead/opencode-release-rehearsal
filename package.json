@@ -1,6 +1,6 @@
 {
   "name": "@joe-broadhead/opencode-release-rehearsal",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "TEST ONLY: a rehearsal of the release kit, copied from opencode-tavily. Not a plugin to install: it has no Jelly declaration and its plugin id is rehearsal.kit.",
   "keywords": [
@@ -47,7 +47,8 @@
     "check:upstream": "bun tools/check-upstream.mjs",
     "icons": "node scripts/check-icons.mjs",
     "actionlint": "node scripts/check-actionlint.mjs",
-    "capture": "node scripts/capture-tools.mjs"
+    "capture": "node scripts/capture-tools.mjs",
+    "conformance": "node scripts/rehearsal-conformance.mjs"
   },
   "devDependencies": {
     "@babel/core": "7.29.7",
@@ -94,5 +95,9 @@
       "name": "Tavily",
       "domain": "tavily.com"
     }
+  },
+  "sources": {
+    "contractVersion": 1,
+    "items": []
   }
 }
